@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/keel-core",
+    "crates/keel-store",
+    "crates/keel-openai",
+    "crates/keel-tools",
+    "crates/keel-mcp",
+    "crates/keel-skills",
+    "crates/keel-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+keel-core = { path = "crates/keel-core" }
+keel-store = { path = "crates/keel-store" }
+keel-openai = { path = "crates/keel-openai" }
+keel-tools = { path = "crates/keel-tools" }
+keel-mcp = { path = "crates/keel-mcp" }
+keel-skills = { path = "crates/keel-skills" }
+anyhow = "1"
+async-trait = "0.1"
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "fs", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+ulid = { version = "1", features = ["serde"] }

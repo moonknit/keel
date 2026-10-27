@@ -1,0 +1,31 @@
+[package]
+name = "keel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "keel"
+path = "src/main.rs"
+
+[dependencies]
+keel-core.workspace = true
+keel-store.workspace = true
+keel-openai.workspace = true
+keel-tools.workspace = true
+keel-mcp.workspace = true
+keel-skills.workspace = true
+anyhow.workspace = true
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+dotenvy.workspace = true
+rustyline = "15"
+tokio.workspace = true
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,19 @@
+[package]
+name = "keel-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+keel-core.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+ulid.workspace = true
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

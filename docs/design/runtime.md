@@ -26,7 +26,7 @@
 - 크론 스케줄러 본체.
 - 서브에이전트 프로세스 트리.
 - 장기 메모리 플랫폼.
-- Docker 샌드박스. v1은 로컬 권한 게이트.
+- Docker 샌드박스. `bash` OS jail(Seatbelt/`bwrap`)은 한다.
 
 ## 공개 구현에서 고정한 결정
 
@@ -212,13 +212,13 @@ keel --continue          위와 같음
 keel --resume            이 cwd session 목록에서 고름
 keel --resume <id>       그 session
 keel --new               새 session
-keel -p "<prompt>"       print 모드. 새 session에서 chat 하나, 최종 텍스트만 stdout
+keel -p "<prompt>"       print 모드. 새 session에서 chat 하나, 텍스트 델타는 도착하는 대로 stdout
 keel session list [--all]
 keel session show <id>
 keel session rm <id>     archived = 1
 ```
 
-`-p`는 대화하지 않는다. 승인이 필요한 도구는 거부로 처리하고, `--allow-edits`면 `write` `edit`만 허용한다. 종료 코드는 0 완료, 1 오류, 2 `max_turns`, 130 취소. 스크립트와 종단 테스트에 쓴다.
+`-p`는 대화하지 않는다. 텍스트 델타는 도착하는 대로 쓰고, 도구 줄은 쓰지 않는다. 승인이 필요한 도구는 거부로 처리하고, `--allow-edits`면 `write` `edit`만 허용한다. 종료 코드는 0 완료, 1 오류, 2 `max_turns`, 130 취소. 스크립트와 종단 테스트에 쓴다.
 
 대화 화면은 전체 화면 TUI가 아니다. 스트리밍 REPL이다. goose CLI, Claude Code에 가깝다.
 
@@ -272,7 +272,7 @@ v1 제공자는 OpenAI 하나다. 호출은 [Responses API](https://developers.o
 
 이유. Responses는 로컬 function tool과 hosted 도구를 한 요청에 같이 넣는다. 코딩 도구는 우리가 실행하고, 웹 검색은 OpenAI가 실행한다.
 
-기본 모델은 설정 `model`이다. 키는 `OPENAI_API_KEY`. 구현은 `keel-openai`가 `Model` trait을 채운다. core는 SDK를 의존하지 않는다.
+모델 식별자와 한도는 환경 변수가 정본이다. `LLM_MODEL`, `LLM_BASE_URL`, `LLM_REASONING_EFFORT`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`. 키는 `OPENAI_API_KEY`. cwd `.env`를 읽을 수 있다. 설정 파일 `model`은 환경 변수가 없을 때의 기본값이다. `SMALL_LLM_*`는 v1 본 루프에서 쓰지 않는다. 구현은 `keel-openai`가 `Model` trait을 채운다. core는 SDK를 의존하지 않는다. 이름 목록은 `.env.example`과 [REQ-3.8](../planning/srs.md).
 
 쓰지 않는 OpenAI hosted 도구.
 
@@ -314,7 +314,7 @@ mini-swe의 “bash면 된다”와 goose/pi의 파일 도구를 섞는다. v1 �
 - 위험 패턴에 걸린 bash는 allowlist에 있어도 항상 확인한다. `rm -rf`, `sudo`, `git push`, `curl`·`wget`·`ssh` 같은 네트워크 명령, 파이프로 셸 실행 등. 명령 문자열을 보는 휴리스틱이라 보안 경계가 아니다.
 - 워크스페이스 밖 쓰기는 항상 확인.
 
-샌드박스는 v1에서 프로세스 격리가 아니다. cwd + allowlist + 타임아웃 + 출력 상한이다. Docker는 호스트 옵션으로 나중에 붙인다. 커널은 `Sandbox` trait만 본다.
+`bash`는 OS jail을 쓴다. macOS Seatbelt, Linux `bwrap`. 같은 계층을 Anthropic `sandbox-runtime`이 감싸지만, keel은 그 Node 패키지를 넣지 않는다. jail 안 쓰기는 cwd와 tmp, 네트워크는 끊는다. jail이 없거나 위험 패턴이면 승인 뒤에 호스트에서 돈다. jail 시작 실패는 호스트로 바꾸지 않는다. Docker는 여전히 나중에. 커널은 실행 경로를 모르고 `keel-tools`가 감싼다.
 
 ### 검색
 
@@ -352,7 +352,7 @@ url = "https://mcp.example/search"
 headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }   # 비밀은 환경 변수로
 ```
 
-설정은 `~/.keel/config.toml`과 `<repo>/.keel/config.toml`이다. 프로젝트 쪽이 덮어쓴다. API 키는 설정에 두지 않고 `OPENAI_API_KEY`만 읽는다.
+설정은 `~/.keel/config.toml`과 `<repo>/.keel/config.toml`이다. 프로젝트 쪽이 덮어쓴다. 비밀과 모델 식별자는 설정에 넣지 않고 환경 변수만 읽는다. 우선순위는 [REQ-3.8](../planning/srs.md).
 
 기동 시 `tools/list`를 받아 Tool로 등록한다. 호출은 `tools/call`이다. 서버가 죽으면 그 서버 도구만 에러 observation으로 돌아간다. 루프는 죽지 않는다.
 
