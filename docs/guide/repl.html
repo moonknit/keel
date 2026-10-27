@@ -203,7 +203,7 @@ if let Some(meta) = list.into_iter().next() {
   </table>
   <pre><span class="c">// build_agent — REPL은 print=false, 그래서 키보드 승인을 붙입니다.</span>
 let skills = discover(cwd);
-let mut tools = coding_tools();          <span class="c">// 코딩 도구 6개</span>
+let mut tools = default_tools();         <span class="c">// 기본 로컬 도구 6개</span>
 tools.push(Arc::new(SkillTool { skills: skills.clone() }));
 let system = format!("{}\n{}", load_agents_md(cwd), catalog_text(&amp;skills));
 let model = if KEEL_SCRIPTED=1 { ScriptedModel } else { OpenAiModel::from_env() };
@@ -363,7 +363,7 @@ Event::RunEnd { .. } =&gt; println!();</pre>
 
   <h2 id="tools">10. 도구 목록</h2>
   <p>
-    모델이 볼 수 있는 로컬 도구는 <code>coding_tools()</code>와 <code>skill</code>입니다.
+    모델이 볼 수 있는 로컬 도구는 <code>default_tools()</code>와 <code>skill</code>입니다.
     작업 디렉터리는 session cwd입니다.
   </p>
   <table>

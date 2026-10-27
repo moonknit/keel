@@ -15,7 +15,9 @@ pub use config::LlmSettings;
 pub use error::{KeelError, Result};
 pub use memory::MemoryStore;
 pub use scripted::{FakeTool, ScriptedModel};
-pub use traits::{AlwaysAllow, AlwaysDeny, Approver, ContextSource, Model, Store, Tool};
+pub use traits::{
+    AlwaysAllow, AlwaysDeny, Approver, ApproverHooks, ContextSource, Hooks, Model, Store, Tool,
+};
 pub use types::*;
 
 #[cfg(test)]
@@ -90,6 +92,37 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let status = agent
+            .run(&session.meta.id, "hello", "/tmp", cancel, tx)
+            .await
+            .unwrap();
+        let ws = store.open_session(&session.meta.id).await.unwrap();
+        (status, ws)
+    }
+
+    async fn run_with_hooks(
+        model: ScriptedModel,
+        tools: Vec<Arc<dyn Tool>>,
+        approver: Arc<dyn Approver>,
+        hooks: Arc<dyn Hooks>,
+        cancel: CancellationToken,
+    ) -> (RunStatus, WorkingSession) {
+        let store = Arc::new(MemoryStore::default());
+        let session = store.create_session("/tmp", "test-model").await.unwrap();
+        let agent = Agent {
+            model: Arc::new(model),
+            tools,
+            store: store.clone(),
+            approver,
+            assembler: Arc::new(ContextAssembler::default()),
+            max_turns: 3,
+            system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
+            hooks: Some(hooks),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let status = agent
@@ -513,6 +546,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel_run = cancel.clone();
@@ -589,6 +623,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel_run = cancel.clone();
@@ -647,6 +682,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel_run = cancel.clone();
@@ -719,6 +755,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let run = tokio::spawn(async move {
@@ -851,6 +888,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let status = agent
@@ -912,6 +950,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let err = agent
@@ -964,6 +1003,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock: CwdWriteLock::default(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         agent
@@ -1028,6 +1068,7 @@ mod loop_tests {
             system: "test".into(),
             write_lock,
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         agent
@@ -1221,6 +1262,90 @@ mod loop_tests {
         .expect("REQ-3.28 separate CwdWriteLock objects must not block each other");
         assert_eq!(ran.0, RunStatus::Done);
         assert_eq!(ran.1, RunStatus::Done);
+    }
+
+    struct StopAfterTool;
+
+    #[async_trait::async_trait]
+    impl Hooks for StopAfterTool {
+        fn should_stop(&self) -> bool {
+            true
+        }
+    }
+
+    /// REQ-3.4 INV-18 should_stop ends the run after pairing tool results.
+    #[tokio::test]
+    async fn req_3_4_inv18_should_stop_pairs_then_ends() {
+        let model = ScriptedModel::new(vec![
+            vec![
+                ModelEvent::ItemDone(item_call("echo", "c1")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ModelEvent::ItemDone(item_text("should-not-run")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+        ]);
+        let (status, ws) = run_with_hooks(
+            model,
+            vec![Arc::new(FakeTool::new("echo", "pong"))],
+            Arc::new(AlwaysAllow),
+            Arc::new(StopAfterTool),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(status, RunStatus::Done);
+        let kinds: Vec<_> = ws.chats[0]
+            .items
+            .iter()
+            .map(|i| match &i.kind {
+                ItemKind::ToolCall { call_id, .. } => format!("call:{call_id}"),
+                ItemKind::ToolResult { call_id, .. } => format!("result:{call_id}"),
+                ItemKind::Text { text } => format!("text:{text}"),
+                _ => "other".into(),
+            })
+            .collect();
+        assert!(kinds.iter().any(|k| k == "call:c1"));
+        assert!(kinds.iter().any(|k| k == "result:c1"));
+        assert!(!kinds.iter().any(|k| k.contains("should-not-run")));
+    }
+
+    struct CountPrepare {
+        n: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for CountPrepare {
+        fn prepare_next_turn(&self, assembled: &mut Assembled) {
+            self.n.fetch_add(1, Ordering::SeqCst);
+            let _ = assembled;
+        }
+    }
+
+    /// REQ-3.4 prepare_next_turn runs before each model call.
+    #[tokio::test]
+    async fn req_3_4_prepare_next_turn_before_model() {
+        let n = Arc::new(AtomicUsize::new(0));
+        let model = ScriptedModel::new(vec![vec![
+            ModelEvent::ItemDone(item_text("ok")),
+            ModelEvent::Completed {
+                usage: Default::default(),
+            },
+        ]]);
+        let (status, _) = run_with_hooks(
+            model,
+            vec![],
+            Arc::new(AlwaysAllow),
+            Arc::new(CountPrepare { n: n.clone() }),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(status, RunStatus::Done);
+        assert_eq!(n.load(Ordering::SeqCst), 1);
     }
 }
 

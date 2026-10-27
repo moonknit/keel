@@ -11,8 +11,8 @@
 이번 설계에 필요한 기능도 같이 봤다.
 
 - ReAct 루프
-- 코드 생성과 실행
-- MCP와 도구. 검색, 코딩
+- 파일 읽기·쓰기와 명령 실행
+- MCP와 도구. 검색, 기본 로컬 도구
 - `SKILL.md` 스킬
 - 대화 저장 이름. session vs context
 - 로컬 저장. JSONL vs SQLite
@@ -24,14 +24,14 @@
 
 철학이 가장 가까운 구현은 TypeScript `pi-agent-core`다. 가장 짧은 정의는 Hugging Face tiny-agents다. Rust로 바로 가져다 쓸 가벼운 런타임은 없다. goose는 성숙한 Rust 제품이고, agentd는 런타임 카테고리는 맞지만 AGPL에 커뮤니티가 없다. `llm-agent-runtime` crate는 ReAct+MCP가 있지만 메모리·그래프까지 넣은 키친싱크다.
 
-코딩 도구와 `SKILL.md`는 커널이 아니라 호스트 쪽에 두는 쪽이 공개 구현과 맞다. 저장된 대화의 이름은 session이다. context는 모델에 넣는 창이다.
+기본 로컬 도구와 `SKILL.md`는 커널이 아니라 호스트 쪽에 두는 쪽이 공개 구현과 맞다. 저장된 대화의 이름은 session이다. context는 모델에 넣는 창이다.
 
 ## 요구 기능별 누가 뭘 하나
 
 | 기능 | 짧은 구현 | 성숙한 구현 | keel이 가져올 것 | 가져오면 안 되는 것 |
 |---|---|---|---|---|
 | ReAct 루프 | tiny-agents `Agent.ts` 4.7KB. mini-swe `default.py` 8KB | pi-agent-core. goose `agent.rs` 98KB | native tool call을 Act로 쓰는 루프. 텍스트 `Action:` 파서는 기본이 아님 | smolagents CodeAgent. 모델이 파이썬을 써서 도구를 호출 |
-| 코드 생성·실행 | mini-swe는 bash 하나 | goose, pi coding agent, OpenCode | `bash` `read` `write` `edit` `grep` `glob`. 실행은 bash | 커널 안 인터프리터. 86개 도구를 바이너리에 박기 |
+| 파일·실행 | mini-swe는 bash 하나 | goose, pi coding agent, OpenCode | `bash` `read` `write` `edit` `grep` `glob`. 실행은 bash | 커널 안 인터프리터. 86개 도구를 바이너리에 박기 |
 | MCP | tiny-agents. mcp-agent | goose extensions | MCP는 Tool 소스. `rmcp` | MCP를 커널 상태기계로 만들기 |
 | 검색 | OpenAI hosted `web_search` | goose 확장, MCP 검색 | Responses API에 hosted 도구를 붙임. 로컬 function으로 다시 만들지 않음 | 모델만 켠다고 검색된다고 가정 |
 | 스킬 첨부 | pi: 루트 알리고 `read` | Agent Skills `scripts/` `references/` | 본문만 주입. 파일은 기존 `read` `bash` | 스킬 전용 실행기 |
@@ -72,7 +72,7 @@
 
 문장 하나가 정의다. MCP 클라이언트가 있으면 에이전트는 그 위의 while 루프다. 도구는 커널에 없다. 설정은 `agent.json`과 MCP 서버 목록. 프롬프트는 `AGENTS.md` 또는 `PROMPT.md`.
 
-코딩 도구 세트나 `SKILL.md` 카탈로그는 없다. 패턴만 가져온다.
+기본 파일·실행 도구 세트나 `SKILL.md` 카탈로그는 없다. 패턴만 가져온다.
 
 글: [Tiny Agents](https://huggingface.co/blog/tiny-agents), [Python 판](https://huggingface.co/blog/python-tiny-agents).
 
@@ -158,7 +158,7 @@ progressive disclosure.
 
 pi와 goose와 Claude Code가 이 형식을 읽는다. 탐색 경로는 `.agents/skills/`, `~/.agents/skills/`, 호환으로 `.claude/skills/`.
 
-스킬은 도구가 아니다. 지시문과 첨부 파일이다. 스크립트 실행은 bash 같은 코딩 도구로 한다.
+스킬은 도구가 아니다. 지시문과 첨부 파일이다. 스크립트 실행은 bash 같은 로컬 도구로 한다.
 
 ## 토큰을 아끼고 읽는 순서
 

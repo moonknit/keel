@@ -24,7 +24,10 @@ for line in sys.stdin:
     msg = json.loads(line)
     mid = msg.get("id")
     method = msg.get("method")
-    if method == "notifications/initialized":
+    if mid is None:
+        continue
+    if method == "server/discover":
+        print(json.dumps({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}}), flush=True)
         continue
     if method == "initialize":
         result = {"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"t","version":"0"}}
@@ -33,7 +36,8 @@ for line in sys.stdin:
     elif method == "tools/call":
         result = {"content":[{"type":"text","text":"pong"}]}
     else:
-        result = {}
+        print(json.dumps({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}}), flush=True)
+        continue
     print(json.dumps({"jsonrpc":"2.0","id":mid,"result":result}), flush=True)
 "#,
     )

@@ -49,3 +49,9 @@ jail이 켜진 `bash`는 cwd와 임시 디렉터리 밖에 쓰지 못하고, 네
 
 ### INV-16
 자식은 새 session이다. 부모 session을 다시 열지 않는다. 자식은 `spawn`/`wait`를 갖지 않는다.
+
+### INV-17
+신뢰한 설정의 MCP HTTP 서버는 기동 시 연결한다. 파싱만 하고 건너뛰면 REQ-3.18을 충족한 것이 아니다.
+
+### INV-18
+훅은 루프 콜백이다. Inbox `Hook` 메시지 처리로 대체하지 않는다. `should_stop`으로 런을 끝낼 때도 짝 없는 `tool_call`에 result를 붙인다.

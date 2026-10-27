@@ -183,6 +183,7 @@ impl Spawn {
             system: self.system.clone(),
             write_lock: self.write_lock.clone(),
             inbox: Inbox::default(),
+            hooks: None,
         }
     }
 
@@ -575,6 +576,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         agent
@@ -675,6 +677,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         agent
@@ -742,6 +745,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         agent
@@ -799,6 +803,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         agent
@@ -836,6 +841,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         agent
@@ -912,6 +918,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let status = agent
@@ -986,6 +993,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         }
     }
 
@@ -1207,6 +1215,7 @@ mod tests {
             system: "parent".into(),
             write_lock: CwdWriteLock::new(),
             inbox: Inbox::default(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let status = agent
@@ -1353,6 +1362,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1446,6 +1456,7 @@ mod tests {
             system: "parent".into(),
             write_lock: spawn.write_lock.clone(),
             inbox: spawn.inbox.clone(),
+            hooks: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();

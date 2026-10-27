@@ -1,6 +1,6 @@
 # Error model
 
-권위: [srs.md](../planning/srs.md) REQ-4.4, REQ-3.13, REQ-3.18, REQ-3.23, REQ-3.26–3.28.
+권위: [srs.md](../planning/srs.md) REQ-4.4, REQ-3.13, REQ-3.18, REQ-3.23, REQ-3.26–3.29.
 
 ## 분류
 
@@ -20,7 +20,7 @@
 ## 복구
 
 - 열기: `running` → `interrupted` + 짝 없는 tool_call에 interrupted result. 도구를 다시 실행하지 않는다.
-- MCP: 죽은 서버의 다음 `tools/call`만 `tool` 에러. 다른 도구와 루프는 산다.
+- MCP: 연결 실패, 프로토콜 협상 실패, 죽은 서버의 `tools/call`은 그 서버만 `tool` 에러. 다른 도구와 루프는 산다.
 - overflow: 오래된 chat을 더 빼고 한 번만 다시 부른다. 그래도 실패면 `overflow`.
 - 취소: 진행 중 모델/도구를 끊고 짝을 맞춘 뒤 lock은 REPL이면 유지, 종료면 해제. 부모 취소는 미완료 자식도 끊고 부모에 interrupted 요약을 붙인다.
 - plan mode 쓰기: `denied` observation. 런은 유지.

@@ -3,15 +3,15 @@
 조사: [lightweight-agent-runtimes.md](../research/lightweight-agent-runtimes.md).
 제품 한 줄: README. 턴 루프 하나가 커널이다. 비동기 자식 완료는 Inbox로 들어온다. 훅은 루프 콜백이다. 도구와 서브에이전트 런처는 호스트다. 크론·채널·대시보드는 아직 없다.
 
-이 문서는 그 커널에 ReAct, 코드 생성·실행, MCP, `SKILL.md`, 세션 저장, CLI를 어떻게 붙일지 정한다.
+이 문서는 그 커널에 ReAct, 기본 로컬 도구, MCP, `SKILL.md`, 세션 저장, CLI를 어떻게 붙일지 정한다.
 
 ## 요구
 
 반드시 들어간다.
 
 - ReAct 구조. Thought → Action → Observation을 한 루프가 돌린다.
-- 코드를 만들고 실행할 수 있다.
-- MCP와 도구를 쓸 수 있다. 도구에는 검색과 코딩이 있다.
+- 파일을 읽고 쓰고 명령을 실행할 수 있다.
+- MCP와 도구를 쓸 수 있다. 도구에는 검색과 기본 로컬 도구가 있다.
 - 마크다운 스킬을 쓸 수 있다. 형식은 Agent Skills `SKILL.md`.
 - 하나의 대화는 session이다. session은 여러 chat으로 구성된다.
 - session과 chat은 로컬 SQLite에 쓴다. 진행 중에는 메모리에 올리고, 읽고, 다시 쓸 수 있다.
@@ -33,7 +33,7 @@
 | 결정 | 근거 | 반대로 하지 않는 이유 |
 |---|---|---|
 | Act는 native tool call | pi, tiny-agents, goose, Rig | 텍스트 `Action: search` 파서는 모델이 도구를 지원하지 않을 때만 |
-| 코드 실행의 기본 경로는 bash | mini-swe. 코딩 에이전트 공통 | 커널 안 Python 인터프리터. smolagents CodeAgent |
+| 명령 실행의 기본 경로는 bash | mini-swe. 로컬 에이전트 공통 | 커널 안 Python 인터프리터. smolagents CodeAgent |
 | MCP는 Tool 소스 | tiny-agents, goose extensions, agentd | MCP 세션을 커널 상태기계로 승격하지 않음 |
 | 스킬은 도구가 아니라 지시문 | Agent Skills, pi, goose | `SKILL.md` 본문을 시작부터 시스템 프롬프트에 넣지 않음 |
 | 루프만 코어에 둔다 | pi가 하네스를 코어에서 뺀 결정 | Rig/llm-agent-runtime에 루프를 맡기지 않음 |
@@ -42,7 +42,7 @@
 | CLI는 코어 밖 호스트 | pi, goose. 루프는 Event만 냄 | ratatui를 core에 넣지 않음 |
 | v1 모델은 OpenAI Responses API | function tool과 hosted `web_search`를 한 요청에 섞음 | Chat Completions만 쓰면 검색을 따로 구현해야 함 |
 | 웹 검색은 OpenAI hosted 도구 | [OpenAI web search](https://developers.openai.com/api/docs/guides/tools-web-search) | 모델만 쓴다고 검색되지 않음. Tavily 같은 별도 검색 API는 v1에서 안 씀 |
-| 스킬의 파일·실행은 기존 코딩 도구 | Agent Skills `scripts/` `references/`. pi | 스킬 전용 실행기를 만들지 않음 |
+| 스킬의 파일·실행은 기본 로컬 도구 | Agent Skills `scripts/` `references/`. pi | 스킬 전용 실행기를 만들지 않음 |
 
 ## 구조
 
@@ -99,7 +99,7 @@ context라고 부르면 세 가지와 섞인다. 모델 context window, MCP cont
 사용자는 “챗 히스토리 = 여러 챗”이라고 했다. 그건 session = 여러 chat이다.
 
 ```text
-session          이 저장소에서 테스트 고치기
+session          이 디렉터리에서 로그 정리
   chat 1         "실패한 테스트 찾아줘"
     message      user / assistant / tool / tool
   chat 2         "그 테스트부터 고쳐"
@@ -254,7 +254,7 @@ Thought는 모델의 텍스트와 reasoning 블록이다. 별도 `Thought:` 필�
 
 한 턴의 Read(`read` `grep` `glob` `skill`)는 병렬이다. Write·Exec·External은 직렬이다. 같은 cwd의 `write` `edit` `bash`는 부모·자식을 포함해 한 줄이다.
 
-훅은 루프 콜백이다. `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. 채널이 아니다.
+훅은 루프 콜백이다. `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. 채널이 아니다. `Approver`는 `before_tool`의 기본값이다. Inbox `Hook`은 예약 타입일 뿐, 이 콜백을 대신하지 않는다. `should_stop`이 멈추면 짝을 맞춘 뒤 런을 끝낸다.
 
 Inbox 메시지 종류.
 
@@ -272,13 +272,13 @@ Inbox 메시지 종류.
 
 v1 제공자는 OpenAI 하나다. 호출은 [Responses API](https://developers.openai.com/api/docs/guides/tools)다. Chat Completions는 쓰지 않는다.
 
-이유. Responses는 로컬 function tool과 hosted 도구를 한 요청에 같이 넣는다. 코딩 도구는 우리가 실행하고, 웹 검색은 OpenAI가 실행한다.
+이유. Responses는 로컬 function tool과 hosted 도구를 한 요청에 같이 넣는다. 기본 로컬 도구는 우리가 실행하고, 웹 검색은 OpenAI가 실행한다.
 
 모델 식별자와 한도는 환경 변수가 정본이다. `LLM_MODEL`, `LLM_BASE_URL`, `LLM_REASONING_EFFORT`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`. 키는 `OPENAI_API_KEY`. cwd `.env`를 읽을 수 있다. 설정 파일 `model`은 환경 변수가 없을 때의 기본값이다. `SMALL_LLM_*`는 v1 본 루프에서 쓰지 않는다. 구현은 `keel-openai`가 `Model` trait을 채운다. core는 SDK를 의존하지 않는다. 이름 목록은 `.env.example`과 [REQ-3.8](../planning/srs.md).
 
 쓰지 않는 OpenAI hosted 도구.
 
-- `code_interpreter`, hosted `shell`. 코드 실행은 로컬 `bash`다. 워크스페이스 파일을 원격 컨테이너에 올리지 않는다.
+- `code_interpreter`, hosted `shell`. 명령 실행은 로컬 `bash`다. cwd 파일을 원격 컨테이너에 올리지 않는다.
 - hosted MCP. MCP는 `keel-mcp`가 로컬에서 연다.
 
 ## 도구
@@ -287,19 +287,19 @@ v1 제공자는 OpenAI 하나다. 호출은 [Responses API](https://developers.o
 
 소스는 세 곳이다. 로컬 두 곳은 같은 레지스트리다. hosted 검색은 레지스트리가 아니라 모델 요청에 붙는다.
 
-- `keel-tools`: 코딩 도구. 이 프로세스 안. `read`가 여기 있다. 스킬과 워크스페이스가 같이 쓴다.
-- `keel-mcp`: MCP 서버가 광고한 도구. `rmcp`. stdio와 streamable HTTP.
+- `keel-tools`: 기본 로컬 도구. 이 프로세스 안. `read`가 여기 있다. 스킬과 cwd가 같이 쓴다.
+- `keel-mcp`: MCP 서버가 광고한 도구. 공식 SDK `rmcp`. stdio와 streamable HTTP. 프로토콜은 `2026-07-28`과 하위 핸드셰이크를 협상한다.
 - OpenAI hosted `web_search`: 검색. 로컬 `execute`가 없다.
 
 MCP 도구 이름은 항상 `<server>__<tool>`이다. 그래서 builtin과 겹치지 않는다. 점(`.`)은 function 이름 규칙에서 막힐 수 있어 쓰지 않는다. hosted `web_search`와 로컬 도구 이름은 겹치지 않게 둔다. 로컬에 `web_search` function을 다시 만들지 않는다.
 
-### 코딩
+### 기본 로컬 도구
 
-mini-swe의 “bash면 된다”와 goose/pi의 파일 도구를 섞는다. v1 세트.
+mini-swe의 “bash면 된다”와 goose/pi의 파일 도구를 섞는다. 호스트가 루프에 넣는 v1 기본 세트다.
 
 | 도구 | 하는 일 |
 |---|---|
-| `bash` | 명령 실행. 생성한 코드의 실행 경로 |
+| `bash` | 명령 실행 |
 | `read` | 파일 읽기. offset/limit |
 | `write` | 파일 쓰기. 생성 |
 | `edit` | 부분 수정. `old`가 정확히 한 번 일치해야 `new`로 바꾼다. patch 형식은 받지 않는다 |
@@ -334,7 +334,7 @@ allowed_domains = []                             # 비우면 제한 없음
 
 `user_location`을 빼면 OpenAI는 미국 기준으로 검색한다. 그래서 기본값을 둔다.
 
-코딩 검색은 `grep` `glob`이다. 웹 검색과 섞지 않는다.
+파일 검색은 `grep` `glob`이다. 웹 검색과 섞지 않는다.
 
 ## MCP
 
@@ -356,9 +356,9 @@ headers = { Authorization = "Bearer ${SEARCH_TOKEN}" }   # 비밀은 환경 변�
 
 설정은 `~/.keel/config.toml`과 `<repo>/.keel/config.toml`이다. 프로젝트 쪽이 덮어쓴다. 비밀과 모델 식별자는 설정에 넣지 않고 환경 변수만 읽는다. 우선순위는 [REQ-3.8](../planning/srs.md).
 
-기동 시 `tools/list`를 받아 Tool로 등록한다. 호출은 `tools/call`이다. 서버가 죽으면 그 서버 도구만 에러 observation으로 돌아간다. 루프는 죽지 않는다.
+클라이언트는 `rmcp`다. 직접 짠 JSON-RPC를 유지하지 않는다. 기동 시 stdio와 streamable HTTP를 모두 연결하고 `tools/list`로 Tool을 등록한다. HTTP를 파싱만 하고 건너뛰지 않는다. 호출은 `tools/call`이다. 서버가 죽거나 프로토콜 협상에 실패하면 그 서버 도구만 에러 observation으로 돌아간다. 루프는 죽지 않는다.
 
-MCP resource subscription, A2A, 샘플링은 v1에 없다.
+MCP resource subscription, A2A, 샘플링, 장기 작업, 응답 캐시는 v1에 없다.
 
 ## 스킬
 
@@ -379,7 +379,7 @@ progressive disclosure.
 2. 모델이 `skill` 도구를 부르거나 사용자가 `/skill:name`을 주면 `SKILL.md` 본문을 transcript에 붙인다. 결과에 스킬 루트 절대 경로를 넣는다.
 3. 본문이 가리키는 다른 파일은 스킬 로더가 넣지 않는다. 모델이 `read` `glob` `grep` `bash`로 연다.
 
-스킬은 도구가 아니다. 지시문과 첨부 디렉터리다. 파일을 읽고 실행하려면 코딩 도구가 있어야 한다. `read`는 그래서 필수다. 이미 코딩 세트에 있다. 스킬 전용 `read_skill_file`은 만들지 않는다.
+스킬은 도구가 아니다. 지시문과 첨부 디렉터리다. 파일을 읽고 실행하려면 기본 로컬 도구가 있어야 한다. `read`는 그래서 필수다. 이미 기본 세트에 있다. 스킬 전용 `read_skill_file`은 만들지 않는다.
 
 활성화된 스킬 루트는 그 session의 읽기 allowlist에 올라간다. 본문이 session에 남아 다음 chat에서도 쓰이기 때문이다. resume하면 저장된 skill 메시지에서 다시 채운다. `~/.agents/skills/pdf-tools/references/formats.md`처럼 cwd 밖이어도 `read`가 된다. 그 루트의 `scripts/`는 `bash`로 실행한다. 쓰기는 cwd만.
 
@@ -406,7 +406,7 @@ standalone `.md` 한 장 스킬은 v1에서 받지 않는다. `SKILL.md` 디렉�
 |---|---|---|
 | `keel-core` | Message, WorkingSession, Context, ReAct 루프, Event, Store/Tool/Skill trait | 예 |
 | `keel-store` | SQLite. session / chat / message | 예 |
-| `keel-tools` | 코딩 도구, 권한 게이트. `read`는 스킬 루트도 | 예 |
+| `keel-tools` | 기본 로컬 도구, 권한 게이트. `read`는 스킬 루트도 | 예 |
 | `keel-mcp` | MCP → Tool | 예 |
 | `keel-openai` | Responses API. function tools + hosted `web_search` | 예 |
 | `keel-skills` | 탐색, 카탈로그, `skill` 도구 | 예 |
@@ -416,16 +416,16 @@ standalone `.md` 한 장 스킬은 v1에서 받지 않는다. `SKILL.md` 디렉�
 
 ## 한 session의 흐름
 
-사용자가 “이 저장소에서 실패한 테스트를 고치고, 관련 이슈 검색해”라고 한다.
+사용자가 “이 디렉터리에서 실패한 항목을 고치고, 관련 자료를 검색해”라고 한다.
 
 1. CLI가 cwd로 최근 session을 열거나 만든다. `WorkingSession`을 메모리에 올린다.
 2. 입력이 새 `chat`이 된다. `User` message를 Store에 append하고 Inbox에 넣는다.
 3. `ContextAssembler`가 카탈로그와 이전 chat의 context를 만든다.
-4. 모델이 `skill(name=rust-test)`를 부른다. 본문이 transcript와 DB에 들어간다.
-5. 모델이 `glob`, `grep`, `read`로 코드를 본다.
-6. 모델이 OpenAI hosted `web_search`로 이슈를 본다. 실행은 OpenAI다.
+4. 모델이 `skill`을 부른다. 본문이 transcript와 DB에 들어간다.
+5. 모델이 `glob`, `grep`, `read`로 파일을 본다.
+6. 모델이 OpenAI hosted `web_search`로 자료를 본다. 실행은 OpenAI다.
 7. 모델이 `edit` `write`로 고친다. CLI가 게이트를 한 번 묻는다.
-8. 모델이 `bash`로 `cargo test`를 돌린다. 출력이 observation이다.
+8. 모델이 `bash`로 명령을 돌린다. 출력이 observation이다.
 9. 실패면 5로 돌아간다. 성공 텍스트면 이 chat이 끝난다. 다음 입력은 chat 3이 된다.
 10. 프로세스를 꺼도 `keel`이 같은 session을 다시 올린다.
 
@@ -442,7 +442,7 @@ CLI는 Event를 구독만 한다. 커널은 CLI가 누군지 모른다.
 - `AGENTS.md`
 - `keel -p` print 모드
 - OpenAI Responses API. hosted `web_search`
-- 코딩 도구 6개와 권한 게이트. `read`는 워크스페이스와 활성 스킬 루트
+- 기본 로컬 도구 6개와 권한 게이트. `read`는 cwd와 활성 스킬 루트
 - MCP 도구 등록
 - `SKILL.md` 카탈로그와 `skill` 도구. 첨부 파일은 `read` `bash`
 - CLI 명령과 스트리밍 REPL

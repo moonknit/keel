@@ -25,7 +25,8 @@ pub use write::WriteFile;
 use keel_core::traits::Tool;
 use std::sync::Arc;
 
-pub fn coding_tools() -> Vec<Arc<dyn Tool>> {
+/// Default local tools the host injects into the loop.
+pub fn default_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(ReadFile),
         Arc::new(Grep),

@@ -1,5 +1,5 @@
 use crate::error::{KeelError, Result};
-use crate::traits::{Approver, ContextSource, Model, Store, Tool};
+use crate::traits::{Approver, ContextSource, Hooks, Model, Store, Tool};
 use crate::types::{
     ApprovalRequest, ChatStatus, Decision, Event, InboxMessage, Item, ItemKind, RunStatus,
     ToolClass, ToolCx, ToolOutput, ToolSpec, Usage,
@@ -74,6 +74,7 @@ pub struct Agent {
     pub system: String,
     pub write_lock: CwdWriteLock,
     pub inbox: Inbox,
+    pub hooks: Option<Arc<dyn Hooks>>,
 }
 
 impl Agent {
@@ -207,6 +208,7 @@ impl Agent {
                 reads,
                 self.store.clone(),
                 self.approver.clone(),
+                self.hooks.clone(),
                 cx.clone(),
                 chat.id.clone(),
                 cancel.clone(),
@@ -218,6 +220,7 @@ impl Agent {
                 run_tool_call(
                     self.store.clone(),
                     self.approver.clone(),
+                    self.hooks.clone(),
                     call,
                     cx.clone(),
                     chat.id.clone(),
@@ -226,6 +229,15 @@ impl Agent {
                     self.write_lock.clone(),
                 )
                 .await?;
+            }
+            if self.hooks.as_ref().is_some_and(|h| h.should_stop()) {
+                self.store
+                    .end_chat(&chat.id, ChatStatus::Done, usage_sum)
+                    .await?;
+                let _ = events.send(Event::RunEnd {
+                    status: RunStatus::Done,
+                });
+                return Ok(RunStatus::Done);
             }
             if cancel.is_cancelled() {
                 self.finish_interrupted(&chat.id, session_id, usage_sum)
@@ -274,12 +286,15 @@ impl Agent {
     ) -> Result<Vec<crate::types::ModelEvent>> {
         let mut extra_drop = 0usize;
         loop {
-            let assembled = self.assembler.assemble_drop(
+            let mut assembled = self.assembler.assemble_drop(
                 session,
                 self.system.clone(),
                 self.specs(),
                 extra_drop,
             );
+            if let Some(h) = &self.hooks {
+                h.prepare_next_turn(&mut assembled);
+            }
             if assembled.dropped_chats > 0 {
                 let _ = events.send(Event::ContextTrimmed {
                     dropped_chats: assembled.dropped_chats,
@@ -359,6 +374,7 @@ async fn run_read_calls(
     mut reads: Vec<PendingCall>,
     store: Arc<dyn Store>,
     approver: Arc<dyn Approver>,
+    hooks: Option<Arc<dyn Hooks>>,
     cx: ToolCx,
     chat_id: String,
     cancel: CancellationToken,
@@ -371,6 +387,7 @@ async fn run_read_calls(
             run_tool_call(
                 store,
                 approver,
+                hooks,
                 reads.pop().expect("one read"),
                 cx,
                 chat_id,
@@ -385,6 +402,7 @@ async fn run_read_calls(
             for call in reads {
                 let store = store.clone();
                 let approver = approver.clone();
+                let hooks = hooks.clone();
                 let cx = cx.clone();
                 let chat_id = chat_id.clone();
                 let cancel = cancel.clone();
@@ -392,7 +410,7 @@ async fn run_read_calls(
                 let write_lock = write_lock.clone();
                 set.spawn(async move {
                     run_tool_call(
-                        store, approver, call, cx, chat_id, cancel, events, write_lock,
+                        store, approver, hooks, call, cx, chat_id, cancel, events, write_lock,
                     )
                     .await
                 });
@@ -408,6 +426,7 @@ async fn run_read_calls(
 async fn run_tool_call(
     store: Arc<dyn Store>,
     approver: Arc<dyn Approver>,
+    hooks: Option<Arc<dyn Hooks>>,
     call: PendingCall,
     cx: ToolCx,
     chat_id: String,
@@ -447,7 +466,12 @@ async fn run_tool_call(
         args_summary: summary,
         dangerous: false,
     };
-    if !matches!(tool.class(), ToolClass::Read) && approver.approve(&req).await == Decision::Deny {
+    let decision = match &hooks {
+        Some(h) => h.before_tool(&req).await,
+        None if matches!(tool.class(), ToolClass::Read) => Decision::Once,
+        None => approver.approve(&req).await,
+    };
+    if !matches!(tool.class(), ToolClass::Read) && decision == Decision::Deny {
         store
             .append(&chat_id, Item::tool_result(&call_id, "denied", true))
             .await?;
@@ -490,6 +514,9 @@ async fn run_tool_call(
             Item::tool_result(&call_id, &out.text, out.is_error),
         )
         .await?;
+    if let Some(h) = &hooks {
+        h.after_tool(&name, &out).await;
+    }
     if name == "skill" && !out.is_error {
         if let Some(root) = out.text.lines().find_map(|l| l.strip_prefix("skill_root=")) {
             let sk_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("skill");

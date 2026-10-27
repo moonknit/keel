@@ -10,11 +10,11 @@ keel v1. 권위는 이 문서다. 설계 배경은 [runtime.md](../design/runtim
 
 ### 1.2 범위
 
-v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 워크스페이스에서 대화를 이어 가며 코드를 읽고 고치고 실행하고, 웹을 검색하고, MCP 도구와 `SKILL.md` 스킬을 쓴다. 대화는 로컬 SQLite에 남는다.
+v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 cwd에서 대화를 이어 가며 파일을 읽고 고치고 명령을 실행하고, 웹을 검색하고, MCP 도구와 `SKILL.md` 스킬을 쓴다. 대화는 로컬 SQLite에 남는다.
 
-보강: 한 턴의 읽기 도구 병렬, plan mode(쓰기 전 승인), 1단 서브에이전트(동기 wait·비동기 spawn). 부모에는 위임 요약만 남기고 자식 본문은 별 session에 둔다. 같은 cwd의 쓰기는 에이전트 경계를 넘어 한 줄이다.
+보강: 한 턴의 읽기 도구 병렬, plan mode(쓰기 전 승인), 1단 서브에이전트(동기 wait·비동기 spawn). 부모에는 위임 요약만 남기고 자식 본문은 별 session에 둔다. 같은 cwd의 쓰기는 에이전트 경계를 넘어 한 줄이다. MCP 클라이언트는 `rmcp`다. stdio와 streamable HTTP를 기동 시 붙인다. 훅은 루프 콜백 네 개다.
 
-하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리(깊이 2+), 커스텀 에이전트 정의 파일, 에이전트 팀, git worktree 격리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, planner/executor 이중 모델, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
+하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리(깊이 2+), 커스텀 에이전트 정의 파일, 에이전트 팀, git worktree 격리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, planner/executor 이중 모델, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, MCP resources/prompts/sampling/subscriptions, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
 
 ### 1.3 용어 정의
 
@@ -33,6 +33,8 @@ v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 �
 | plan mode | 읽기만 허용하는 권한 단계. 사람이 계획을 승인한 뒤에 쓰기를 연다 |
 | 자식 session | `spawn`이 연 별 session. 부모와 lock을 나누지 않는다 |
 | write lock | 같은 cwd의 `write`/`edit`/`bash`를 한 번에 하나만 실행하는 가드 |
+| hook | 루프 콜백. `before_tool` `after_tool` `prepare_next_turn` `should_stop`. Inbox `Hook` 메시지와 다르다 |
+| rmcp | 공식 Rust MCP SDK. `keel-mcp`만 의존한다 |
 
 ## 2. 전체 설명
 
@@ -40,7 +42,7 @@ v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 �
 
 ```mermaid
 flowchart TD
-  cli[keel-cli] -->|Message Event Approver| core[keel-core]
+  cli[keel-cli] -->|Message Event Approver Hooks| core[keel-core]
   core --> store[keel-store]
   core --> tools[keel-tools]
   core --> mcp[keel-mcp]
@@ -49,21 +51,22 @@ flowchart TD
   openai --> api[OpenAI Responses]
 ```
 
-`keel-core`는 SQLite, HTTP, MCP, 터미널, 파일 도구를 의존하지 않는다. 저장은 `Store`, 모델은 `Model`, 도구는 `Tool`, 승인은 `Approver`다.
+`keel-core`는 SQLite, HTTP, MCP, 터미널, 파일 도구를 의존하지 않는다. 저장은 `Store`, 모델은 `Model`, 도구는 `Tool`, 승인은 `Approver`, 훅은 루프 콜백이다. `Approver`는 `before_tool`의 기본값이다.
 
 ### 2.2 제품 기능
 
 - ReAct 루프. Thought는 모델 텍스트/reasoning, Action은 tool call, Observation은 tool result.
-- 코딩 도구 6개와 권한 게이트.
+- 기본 로컬 도구 6개와 권한 게이트.
 - OpenAI hosted 웹 검색.
-- MCP 서버 도구 등록.
+- MCP 서버 도구 등록. `rmcp`로 stdio와 streamable HTTP. 프로토콜은 `2026-07-28`과 하위 핸드셰이크를 협상한다.
+- 루프 훅 콜백. `before_tool` `after_tool` `prepare_next_turn` `should_stop`.
 - `SKILL.md` 카탈로그와 on-demand 본문, `AGENTS.md`.
 - session 저장·이어하기·목록, 스트리밍 REPL과 print 모드.
 - 읽기 도구 병렬, plan mode, 1단 서브에이전트(`spawn`/`wait`).
 
 ### 2.3 사용자 특성
 
-터미널에서 저장소를 다루는 개발자. 한 워크스페이스(cwd)에서 대화를 이어 간다.
+터미널에서 cwd의 파일과 도구를 쓰는 사용자. 한 작업 디렉터리에서 대화를 이어 간다.
 
 ### 2.4 제약사항
 
@@ -91,7 +94,9 @@ flowchart TD
 
 #### REQ-3.4 Inbox와 훅
 
-Inbox는 `User`와 `Subagent`(자식 완료 요약)를 처리한다. `Hook` `Cron` `Steer`는 타입만 예약한다. 훅은 루프 콜백이다: `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. `Subagent` 메시지는 부모 transcript에 요약 `tool_result`로만 붙는다. 자식 본문을 펼치지 않는다.
+Inbox는 `User`와 `Subagent`(자식 완료 요약)를 처리한다. `Hook` `Cron` `Steer`는 타입만 예약한다. Inbox `Hook`을 처리하는 것이 훅이 아니다.
+
+훅은 루프 콜백이다: `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. 채널이 아니다. `Approver`는 `before_tool`의 기본 구현이다. `should_stop`이 멈추면 짝 없는 `tool_call`에 result를 붙인 뒤 런을 끝낸다(REQ-3.3). `prepare_next_turn`은 다음 모델 호출 직전이다. 코어는 파일·네트워크를 모른다. 호스트가 no-op 또는 정책을 넣는다. `Subagent` 메시지는 부모 transcript에 요약 `tool_result`로만 붙는다. 자식 본문을 펼치지 않는다.
 
 #### REQ-3.5 Event 분리
 
@@ -144,7 +149,7 @@ core는 Event만 낸다. 터미널 I/O와 승인 UI는 `keel-cli`에만 둔다. 
 
 `ContextAssembler`는 시스템 프롬프트 + `AGENTS.md` + 스킬 카탈로그 + 최근 message로 context를 만든다. 추정 입력이 `context_limit`의 80%를 넘으면 오래된 chat을 통째로 빼고 일회성 Notice를 붙인다. Notice는 저장하지 않는다. 진행 중 chat은 자르지 않는다. 요약 compaction과 `/compact` 동작은 v1에 없다.
 
-#### REQ-3.15 코딩 도구
+#### REQ-3.15 기본 로컬 도구
 
 로컬 도구: `bash`, `read`, `write`, `edit`, `grep`, `glob`. 작업 디렉터리는 session cwd다. `edit`는 `old`가 정확히 한 번 일치할 때만 `new`로 바꾼다. unified patch는 받지 않는다.
 
@@ -169,7 +174,11 @@ core는 Event만 낸다. 터미널 I/O와 승인 UI는 `keel-cli`에만 둔다. 
 
 #### REQ-3.18 MCP
 
-설정 `[[mcp.servers]]`의 stdio와 streamable HTTP 서버를 `keel-cli` 기동 시 `tools/list`로 등록하고 `Agent.tools`에 넣는다. 도구 이름은 항상 `<server>__<tool>`이다. 연결 타임아웃 10초. 한 서버 실패는 그 서버 도구의 에러 observation으로만 남기고 루프는 계속한다. MCP crate만 있고 CLI가 연결하지 않으면 이 요구를 충족한 것이 아니다. MCP resources/prompts/sampling은 v1에 없다.
+`keel-mcp`는 공식 Rust SDK `rmcp` 클라이언트다. 직접 짠 JSON-RPC 클라이언트를 유지하지 않는다. `rmcp`는 `keel-mcp`에만 둔다(REQ-4.1).
+
+설정 `[[mcp.servers]]`의 stdio와 streamable HTTP 서버를 `keel-cli` 기동 시 연결하고 `tools/list`로 등록해 `Agent.tools`에 넣는다. HTTP 항목을 파싱만 하고 건너뛰면 이 요구를 충족한 것이 아니다. 도구 이름은 항상 `<server>__<tool>`이다. 연결 타임아웃 10초. 한 서버 실패는 그 서버 도구의 에러 observation으로만 남기고 루프는 계속한다. MCP crate만 있고 CLI가 연결하지 않으면 이 요구를 충족한 것이 아니다.
+
+MCP resources/prompts/sampling/subscriptions와 `2026-07-28`의 장기 작업·응답 캐시·multi-round-trip 제품 노출은 v1에 없다. OpenAI hosted MCP는 쓰지 않는다.
 
 #### REQ-3.19 스킬
 
@@ -225,11 +234,15 @@ plan mode에서는 Read 클래스만 실행한다. Write·Exec·External은 승�
 
 같은 session cwd에서 `write` `edit` `bash`는 부모와 자식을 포함해 한 번에 하나만 실행한다. 둘째는 첫째가 끝날 때까지 기다린다. Read는 lock을 잡지 않는다. git worktree로 cwd를 나누지 않는다.
 
+#### REQ-3.29 MCP 프로토콜 협상
+
+프로토콜 버전은 `rmcp`가 협상한다. 기본은 MCP `2026-07-28`이다. `initialize` 핸드셰이크 서버(`2025-11-25` 이하, `2024-11-05` 포함)도 같은 프로세스에서 붙는다. 한 서버가 협상에 실패하면 그 서버만 빼고 나머지는 붙인다. 코어는 버전 문자열을 모른다.
+
 ### 3.2 비기능 요구사항
 
 #### REQ-4.1 crate 경계
 
-workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `keel-skills`, `keel-cli`. core는 rusqlite, reqwest, rmcp, clap, rustyline, 파일/프로세스 도구를 의존하지 않는다.
+workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `keel-skills`, `keel-cli`. core는 rusqlite, reqwest, rmcp, clap, rustyline, 파일/프로세스 도구를 의존하지 않는다. `rmcp`는 `keel-mcp`만 의존한다.
 
 #### REQ-4.2 로그
 

@@ -598,7 +598,7 @@ repl(&amp;db, &amp;session.meta.id, &amp;cwd, allow_edits, &amp;cfg, &amp;model_
     cfg: &amp;config::KeelConfig,
 ) -&gt; Result&lt;Agent&gt; {
     let skills = discover(cwd);
-    let mut tools = coding_tools();     <span class="c">// Vec&lt;Arc&lt;dyn Tool&gt;&gt;</span>
+    let mut tools = default_tools();    <span class="c">// Vec&lt;Arc&lt;dyn Tool&gt;&gt;</span>
     tools.push(Arc::new(SkillTool { skills: skills.clone() }));
     tools.extend(attach_mcp_tools(cfg).await);
     ...

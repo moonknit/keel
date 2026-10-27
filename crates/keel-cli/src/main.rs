@@ -11,7 +11,7 @@ use keel_core::types::{ApprovalRequest, Decision, Event, ModelEvent, Role, RunSt
 use keel_openai::OpenAiModel;
 use keel_skills::{SkillTool, catalog_text, discover, load_agents_md};
 use keel_store::SqliteStore;
-use keel_tools::{Policy, PolicyApprover, coding_tools};
+use keel_tools::{Policy, PolicyApprover, default_tools};
 use rustyline::DefaultEditor;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -213,16 +213,25 @@ fn into(e: keel_core::KeelError) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
 }
 
-fn stdio_mcp_configs(cfg: &config::KeelConfig) -> Vec<keel_mcp::McpServerConfig> {
+fn mcp_configs(cfg: &config::KeelConfig) -> Vec<keel_mcp::McpServerConfig> {
     cfg.servers
         .iter()
-        .filter(|s| s.transport == "stdio")
-        .filter_map(|s| {
-            Some(keel_mcp::McpServerConfig {
+        .filter_map(|s| match s.transport.as_str() {
+            "stdio" => Some(keel_mcp::McpServerConfig {
                 name: s.name.clone(),
-                command: s.command.clone()?,
-                args: s.args.clone(),
-            })
+                transport: keel_mcp::McpTransport::Stdio {
+                    command: s.command.clone()?,
+                    args: s.args.clone(),
+                },
+            }),
+            "http" => Some(keel_mcp::McpServerConfig {
+                name: s.name.clone(),
+                transport: keel_mcp::McpTransport::Http {
+                    url: s.url.clone()?,
+                    headers: s.headers.clone(),
+                },
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -231,7 +240,7 @@ async fn attach_mcp_tools(cfg: &config::KeelConfig) -> Vec<Arc<dyn keel_core::tr
     if cfg.needs_confirm {
         return Vec::new();
     }
-    keel_mcp::connect_tools(&stdio_mcp_configs(cfg)).await
+    keel_mcp::connect_tools(&mcp_configs(cfg)).await
 }
 
 async fn build_agent(
@@ -243,7 +252,7 @@ async fn build_agent(
     model_name: &str,
 ) -> Result<(Agent, Arc<PolicyApprover>)> {
     let skills = discover(cwd);
-    let mut tools = coding_tools();
+    let mut tools = default_tools();
     tools.push(Arc::new(SkillTool {
         skills: skills.clone(),
     }));
@@ -299,6 +308,7 @@ async fn build_agent(
             system,
             write_lock,
             inbox,
+            hooks: None,
         },
         policy_approver,
     ))
@@ -530,7 +540,10 @@ for line in sys.stdin:
     msg = json.loads(line)
     mid = msg.get("id")
     method = msg.get("method")
-    if method == "notifications/initialized":
+    if mid is None:
+        continue
+    if method == "server/discover":
+        print(json.dumps({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}}), flush=True)
         continue
     if method == "initialize":
         result = {"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"t","version":"0"}}
@@ -539,7 +552,8 @@ for line in sys.stdin:
     elif method == "tools/call":
         result = {"content":[{"type":"text","text":"pong"}]}
     else:
-        result = {}
+        print(json.dumps({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}}), flush=True)
+        continue
     print(json.dumps({"jsonrpc":"2.0","id":mid,"result":result}), flush=True)
 "#,
         )
@@ -636,20 +650,113 @@ for line in sys.stdin:
         assert!(tools.is_empty());
     }
 
-    /// REQ-3.18 HTTP entries are skipped without crashing (stdio-only client).
+    fn http_script() -> &'static str {
+        r#"
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        self.send_response(405)
+        self.end_headers()
+    def do_DELETE(self):
+        self.send_response(200)
+        self.end_headers()
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        msg = json.loads(self.rfile.read(n) or b"{}")
+        mid = msg.get("id")
+        method = msg.get("method")
+        if mid is None:
+            self.send_response(202)
+            self.end_headers()
+            return
+        if method == "server/discover":
+            result = {
+                "resultType": "complete",
+                "supportedVersions": ["2026-07-28"],
+                "capabilities": {},
+                "ttlMs": 0,
+                "cacheScope": "private",
+            }
+        elif method == "tools/list":
+            result = {"tools":[{"name":"search","description":"s","inputSchema":{"type":"object"}}]}
+        elif method == "tools/call":
+            result = {"content":[{"type":"text","text":"pong-http"}]}
+        else:
+            body = json.dumps({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body.encode())
+            return
+        body = json.dumps({"jsonrpc":"2.0","id":mid,"result":result})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(httpd.server_address[1], flush=True)
+httpd.serve_forever()
+"#
+    }
+
+    fn spawn_http(dir: &std::path::Path) -> (std::process::Child, String) {
+        use std::io::BufRead;
+        let script = dir.join("mcp_http.py");
+        fs::write(&script, http_script()).unwrap();
+        let mut child = std::process::Command::new("python3")
+            .arg(&script)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let port: u16 = line.trim().parse().expect("http mock port");
+        (child, format!("http://127.0.0.1:{port}/"))
+    }
+
+    /// REQ-3.18 INV-17 trusted HTTP connects at start as server__tool.
     #[tokio::test]
-    async fn req_3_18_mcp_http_is_skipped() {
+    async fn req_3_18_inv_17_mcp_http_registers_server_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, url) = spawn_http(dir.path());
         let tools = attach_mcp_tools(&cfg(
-            vec![spec(
-                "search",
-                "http",
-                None,
-                vec![],
-                Some("https://mcp.example/search"),
-            )],
+            vec![spec("search", "http", None, vec![], Some(&url))],
             false,
         ))
         .await;
-        assert!(tools.is_empty());
+        let _ = child.kill();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].spec().name, "search__search");
+    }
+
+    /// REQ-3.18 a dead HTTP server does not prevent others from registering.
+    #[tokio::test]
+    async fn req_3_18_mcp_dead_http_does_not_stop_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = mock_server_script(dir.path());
+        let tools = attach_mcp_tools(&cfg(
+            vec![
+                spec("dead", "http", None, vec![], Some("http://127.0.0.1:1/")),
+                spec(
+                    "demo",
+                    "stdio",
+                    Some("python3"),
+                    vec![script.to_string_lossy().into()],
+                    None,
+                ),
+            ],
+            false,
+        ))
+        .await;
+        let names: Vec<_> = tools.iter().map(|t| t.spec().name).collect();
+        assert_eq!(names, vec!["demo__ping".to_string()]);
     }
 }

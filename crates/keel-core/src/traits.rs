@@ -48,6 +48,39 @@ impl Approver for AlwaysDeny {
     }
 }
 
+/// Loop callbacks. Inbox `Hook` is a reserved message type, not this trait.
+#[async_trait]
+pub trait Hooks: Send + Sync {
+    async fn before_tool(&self, req: &ApprovalRequest) -> Decision {
+        let _ = req;
+        Decision::Once
+    }
+
+    async fn after_tool(&self, name: &str, out: &ToolOutput) {
+        let _ = (name, out);
+    }
+
+    fn prepare_next_turn(&self, assembled: &mut Assembled) {
+        let _ = assembled;
+    }
+
+    fn should_stop(&self) -> bool {
+        false
+    }
+}
+
+/// `Approver` as the default `before_tool`. Other callbacks are no-op.
+pub struct ApproverHooks {
+    pub approver: std::sync::Arc<dyn Approver>,
+}
+
+#[async_trait]
+impl Hooks for ApproverHooks {
+    async fn before_tool(&self, req: &ApprovalRequest) -> Decision {
+        self.approver.approve(req).await
+    }
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn create_session(&self, cwd: &str, model: &str) -> Result<WorkingSession>;
