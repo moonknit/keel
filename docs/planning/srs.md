@@ -12,7 +12,9 @@ keel v1. 권위는 이 문서다. 설계 배경은 [runtime.md](../design/runtim
 
 v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 워크스페이스에서 대화를 이어 가며 코드를 읽고 고치고 실행하고, 웹을 검색하고, MCP 도구와 `SKILL.md` 스킬을 쓴다. 대화는 로컬 SQLite에 남는다.
 
-하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, 별도 검색 API.
+보강: 호스트에 아직 안 붙은 배선(MCP 기동 등록, REPL `/new` `/resume`, `lock_pid` 거부, 파일 로그, `/last` 전문)과 실패 경로(실행 중 취소 짝, bash 한도, jail 기동 실패, 429/overflow 재시도)를 닫는다.
+
+하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
 
 ### 1.3 용어 정의
 
@@ -81,7 +83,7 @@ flowchart TD
 
 #### REQ-3.3 취소와 짝 맞춤
 
-실행 중 취소는 `CancellationToken`으로 현재 모델 호출과 도구를 끊는다. 결과가 없는 `tool_call`에는 `tool_result`를 합성해 붙인다. 짝이 안 맞는 transcript를 모델에 보내지 않는다.
+실행 중 취소는 `CancellationToken`으로 현재 모델 호출과 도구를 끊는다. 모델 스트리밍 도중이든 도구 실행 도중이든, 결과가 없는 `tool_call`에는 `tool_result`를 합성해 붙인다. 짝이 안 맞는 transcript를 모델에 보내지 않는다. 기동 직후·첫 호출 전 취소만 검증해서는 이 요구를 충족한 것이 아니다.
 
 #### REQ-3.4 Inbox와 훅
 
@@ -163,7 +165,7 @@ core는 Event만 낸다. 터미널 I/O와 승인 UI는 `keel-cli`에만 둔다. 
 
 #### REQ-3.18 MCP
 
-설정 `[[mcp.servers]]`의 stdio와 streamable HTTP 서버를 기동 시 `tools/list`로 등록한다. 도구 이름은 항상 `<server>__<tool>`이다. 연결 타임아웃 10초. 한 서버 실패는 그 서버 도구의 에러 observation으로만 남기고 루프는 계속한다. MCP resources/prompts/sampling은 v1에 없다.
+설정 `[[mcp.servers]]`의 stdio와 streamable HTTP 서버를 `keel-cli` 기동 시 `tools/list`로 등록하고 `Agent.tools`에 넣는다. 도구 이름은 항상 `<server>__<tool>`이다. 연결 타임아웃 10초. 한 서버 실패는 그 서버 도구의 에러 observation으로만 남기고 루프는 계속한다. MCP crate만 있고 CLI가 연결하지 않으면 이 요구를 충족한 것이 아니다. MCP resources/prompts/sampling은 v1에 없다.
 
 #### REQ-3.19 스킬
 
@@ -189,7 +191,7 @@ keel session rm <id>
 
 #### REQ-3.22 REPL
 
-스트리밍 REPL. 텍스트 델타는 도착하는 대로 stdout에 쓰고 flush한다. 모델 SSE를 버퍼링한 뒤 한 번에 그리지 않는다. 마크다운 렌더링과 ratatui는 없다. 도구는 한 줄 요약, `/last`로 직전 출력 전체. 승인: `[y]es [a]lways [n]o`. 실행 중 Ctrl-C는 chat을 `interrupted`로 끝낸다. 프롬프트에서 Ctrl-C 두 번 또는 Ctrl-D는 lock을 풀고 종료. 슬래시: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit`. `/compact`는 "v2 예정"만.
+스트리밍 REPL. 텍스트 델타는 도착하는 대로 stdout에 쓰고 flush한다. 모델 SSE를 버퍼링한 뒤 한 번에 그리지 않는다. 마크다운 렌더링과 ratatui는 없다. 도구는 한 줄 요약, `/last`는 직전 도구 출력 전문이다. 승인: `[y]es [a]lways [n]o`. 실행 중 Ctrl-C는 chat을 `interrupted`로 끝낸다. 프롬프트에서 Ctrl-C 두 번 또는 Ctrl-D는 lock을 풀고 종료. 슬래시: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit`. `/new`와 `/resume`은 프로세스 재시작 없이 루프 안에서 session을 바꾸고, help에만 있으면 안 된다. `/compact`는 "v2 예정"만.
 
 #### REQ-3.23 print 모드
 
@@ -211,7 +213,7 @@ workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `
 
 #### REQ-4.3 테스트
 
-루프·저장·권한은 `ScriptedModel` + `MemoryStore` + fake Tool로 검증한다. 실제 OpenAI 호출은 `KEEL_LIVE=1`일 때만. 테스트 이름에 관련 요구 ID를 넣는다.
+루프·저장·권한은 `ScriptedModel` + `MemoryStore` + fake Tool로 검증한다. 실제 OpenAI 호출은 `KEEL_LIVE=1`일 때만. 모델이 로컬 도구를 고르는 경로도 `KEEL_LIVE` 테스트로 고정한다. 테스트 이름에 관련 요구 ID를 넣는다.
 
 #### REQ-4.4 오류 처리
 

@@ -1,11 +1,12 @@
 # 문서 목록
 
 조사·요구·설계·기술 문서의 입구. 사용법과 실행 예는 루트 [README.md](../README.md)에 있다.
-REPL이 코드를 어떻게 타는지 초심자용 안내는 [guide/repl.html](guide/repl.html)이다.
+REPL이 코드를 어떻게 타는지 초심자용 안내는 [guide/repl.html](guide/repl.html)이다. Rust 문법을 코드에 붙여 읽는 안내는 [guide/repl-rust.html](guide/repl-rust.html)이다.
 
 | 문서 | 역할 |
 |---|---|
 | [guide/repl.html](guide/repl.html) | `keel` REPL 경로를 코드와 같이 설명. |
+| [guide/repl-rust.html](guide/repl-rust.html) | 같은 경로를 Rust 문법 위주로 한 줄씩 읽기. |
 | [planning/srs.md](planning/srs.md) | v1 요구 정본. |
 | [technical/domain-model.md](technical/domain-model.md) | session / chat / message와 메모리 타입. |
 | [technical/invariants.md](technical/invariants.md) | 깨지면 안 되는 조건. |

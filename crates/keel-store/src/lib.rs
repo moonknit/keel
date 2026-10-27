@@ -487,6 +487,19 @@ mod tests {
     use super::*;
     use keel_core::Item;
 
+    fn force_lock_pid(store: &SqliteStore, session_id: &str, pid: i64) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session SET lock_pid=?1 WHERE id=?2",
+            params![pid, session_id],
+        )
+        .unwrap();
+    }
+
+    fn me() -> i64 {
+        i64::from(std::process::id())
+    }
+
     /// REQ-3.13 INV-10 recover running chat and pair orphan tool calls.
     #[tokio::test]
     async fn req_3_13_recover_running_and_orphan_tool() {
@@ -515,6 +528,63 @@ mod tests {
         assert!(again.chats[0].items.iter().any(|i| {
             matches!(&i.kind, ItemKind::ToolResult { call_id, output, .. } if call_id == "c1" && output == "interrupted")
         }));
+    }
+
+    /// REQ-3.13 INV-10 same process may reopen; a dead lock_pid is reclaimed.
+    #[tokio::test]
+    async fn req_3_13_inv_10_same_pid_reopen_and_reclaim_dead_lock() {
+        let store = SqliteStore::open_memory().unwrap();
+        let ws = store.create_session("/tmp/ws", "m").await.unwrap();
+        let again = store.open_session(&ws.meta.id).await.unwrap();
+        assert_eq!(again.meta.lock_pid, Some(me()));
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn exited child");
+        let dead = i64::from(child.id());
+        let _ = child.wait();
+        assert!(!pid_alive(dead), "child must have exited");
+
+        force_lock_pid(&store, &ws.meta.id, dead);
+        let reclaimed = store.open_session(&ws.meta.id).await.unwrap();
+        assert_eq!(reclaimed.meta.lock_pid, Some(me()));
+    }
+
+    /// REQ-3.13 INV-10 a living foreign lock_pid rejects open with locked + pid.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn req_3_13_inv_10_reject_live_foreign_lock_pid() {
+        let store = SqliteStore::open_memory().unwrap();
+        let ws = store.create_session("/tmp/ws", "m").await.unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn live child");
+        let foreign = i64::from(child.id());
+        assert_ne!(foreign, me());
+        assert!(pid_alive(foreign), "child must still be running");
+
+        force_lock_pid(&store, &ws.meta.id, foreign);
+        let err = store.open_session(&ws.meta.id).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("locked"), "{msg}");
+        assert!(msg.contains(&foreign.to_string()), "{msg}");
+        let listed = store.list_sessions(None, true).await.unwrap();
+        assert_eq!(listed[0].lock_pid, Some(foreign));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// REQ-5.2 session title starts empty; rename (used by /name) persists it.
+    #[tokio::test]
+    async fn req_5_2_rename_sets_session_title() {
+        let store = SqliteStore::open_memory().unwrap();
+        let ws = store.create_session("/tmp/ws", "m").await.unwrap();
+        assert!(ws.meta.title.is_none());
+        store.rename(&ws.meta.id, "from /name").await.unwrap();
+        let loaded = store.open_session(&ws.meta.id).await.unwrap();
+        assert_eq!(loaded.meta.title.as_deref(), Some("from /name"));
     }
 
     /// REQ-5.1 write-through then reload.

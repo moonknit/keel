@@ -32,4 +32,5 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "fs", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 ulid = { version = "1", features = ["serde"] }

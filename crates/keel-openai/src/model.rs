@@ -110,6 +110,26 @@ fn output_item_to_keel(v: &Value) -> Option<Item> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpFail {
+    Auth,
+    Retry,
+    Overflow,
+    Provider,
+}
+
+fn classify_http(status: u16, body: &str) -> HttpFail {
+    if status == 401 {
+        HttpFail::Auth
+    } else if status == 429 || (500..600).contains(&status) {
+        HttpFail::Retry
+    } else if body.contains("context") {
+        HttpFail::Overflow
+    } else {
+        HttpFail::Provider
+    }
+}
+
 fn tools_json(specs: &[ToolSpec], web_search: bool) -> Vec<Value> {
     let mut out: Vec<Value> = specs
         .iter()
@@ -170,19 +190,28 @@ impl Model for OpenAiModel {
             }
             if !status.is_success() {
                 let text = resp.text().await.map_err(|e| KeelError::Msg(e.to_string()))?;
-                if status.as_u16() == 429 || status.is_server_error() {
-                    last_err = Some(format!("HTTP {status}"));
-                    tokio::time::sleep(std::time::Duration::from_millis(200 * 2u64.pow(attempt))).await;
-                    continue;
+                match classify_http(status.as_u16(), &text) {
+                    HttpFail::Auth => {
+                        return Err(KeelError::Msg("auth: OpenAI rejected the key".into()));
+                    }
+                    HttpFail::Retry => {
+                        last_err = Some(format!("HTTP {status}"));
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200 * 2u64.pow(attempt),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    HttpFail::Overflow => {
+                        return Err(KeelError::Msg("overflow".into()));
+                    }
+                    HttpFail::Provider => {
+                        return Err(KeelError::Msg(format!(
+                            "provider: {}",
+                            text.chars().take(240).collect::<String>()
+                        )));
+                    }
                 }
-                if text.contains("context") && attempt == 0 {
-                    last_err = Some("overflow".into());
-                    continue;
-                }
-                return Err(KeelError::Msg(format!(
-                    "provider: {}",
-                    text.chars().take(240).collect::<String>()
-                )));
             }
             return read_sse_live(resp, cancel, live).await;
         }
@@ -340,5 +369,113 @@ mod tests {
         assert!(ev.iter().any(|e| matches!(e, ModelEvent::TextDelta(_))));
         assert!(ev.iter().any(|e| matches!(e, ModelEvent::ItemDone(_))));
         assert!(ev.iter().any(|e| matches!(e, ModelEvent::Completed { .. })));
+    }
+
+    /// REQ-4.4 429/5xx retry, 401 auth, context overflow.
+    #[test]
+    fn req_4_4_classify_http() {
+        assert_eq!(classify_http(401, ""), HttpFail::Auth);
+        assert_eq!(classify_http(429, "slow"), HttpFail::Retry);
+        assert_eq!(classify_http(503, "down"), HttpFail::Retry);
+        assert_eq!(classify_http(429, "context length"), HttpFail::Retry);
+        assert_eq!(
+            classify_http(400, "context length exceeded"),
+            HttpFail::Overflow
+        );
+        assert_eq!(classify_http(400, "bad request"), HttpFail::Provider);
+    }
+
+    fn spawn_http(
+        replies: Vec<&'static str>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hits_c = hits.clone();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                hits_c.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(reply.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn test_model(base_url: String) -> OpenAiModel {
+        OpenAiModel {
+            settings: LlmSettings {
+                model: "test".into(),
+                base_url,
+                reasoning_effort: "low".into(),
+                max_tokens: 16,
+                temperature: "0.0".into(),
+            },
+            api_key: "sk-test".into(),
+            web_search: false,
+        }
+    }
+
+    /// REQ-4.4 429 is retried with backoff and then succeeds.
+    #[tokio::test]
+    async fn req_4_4_retries_429_then_ok() {
+        use std::sync::atomic::Ordering;
+        let (base, hits) = spawn_http(vec![
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+        ]);
+        let model = test_model(base);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ev = model
+            .stream(
+                ModelRequest {
+                    system: "s".into(),
+                    items: vec![],
+                    tools: vec![],
+                },
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("429 then 200");
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, ModelEvent::Completed { .. }))
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// REQ-4.4 context overflow is signaled immediately; the same request is not retried.
+    #[tokio::test]
+    async fn req_4_4_overflow_signals_without_same_request_retry() {
+        use std::sync::atomic::Ordering;
+        let (base, hits) = spawn_http(vec![
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 23\r\nConnection: close\r\n\r\ncontext length exceeded",
+        ]);
+        let model = test_model(base);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = model
+            .stream(
+                ModelRequest {
+                    system: "s".into(),
+                    items: vec![],
+                    tools: vec![],
+                },
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "overflow");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

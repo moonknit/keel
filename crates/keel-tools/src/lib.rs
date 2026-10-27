@@ -125,6 +125,67 @@ mod tests {
         );
     }
 
+    /// REQ-3.17 timeout default 120s and a real 1s kill.
+    #[tokio::test]
+    async fn req_3_17_bash_timeout() {
+        assert_eq!(Bash::default().timeout_s, 120);
+        let dir = tempfile::tempdir().unwrap();
+        let out = Bash::default()
+            .call(json!({"command":"sleep 5","timeout_s":1}), &cx(dir.path()))
+            .await;
+        assert!(out.is_error, "{}", out.text);
+        assert!(out.text.contains("timeout after 1s"), "{}", out.text);
+    }
+
+    /// REQ-3.17 output is clipped at 30_000 keeping head and tail.
+    #[tokio::test]
+    async fn req_3_17_bash_output_clip_30k() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = Bash::default()
+            .call(
+                json!({
+                    "command": "{ printf 'HEAD'; printf '%040000d' 0; printf 'TAIL'; }"
+                }),
+                &cx(dir.path()),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.text);
+        assert!(out.text.contains("HEAD"), "{}", out.text);
+        assert!(out.text.contains("TAIL"), "{}", out.text);
+        assert!(out.text.contains("chars omitted"), "{}", out.text);
+        assert!(
+            out.text.len() < 31_000,
+            "clipped output too long: {}",
+            out.text.len()
+        );
+    }
+
+    /// REQ-3.25 INV-13 jail start failure is an error; no host `/bin/sh -c` fallback.
+    #[tokio::test(flavor = "current_thread")]
+    async fn req_3_25_inv13_jail_start_failure_no_host_fallback() {
+        let _guard = jail::JailTestOverride::missing_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let out = Bash::default()
+            .call(json!({"command":"echo leaked"}), &cx(dir.path()))
+            .await;
+        assert!(out.is_error, "{}", out.text);
+        assert!(
+            out.text.contains("sandbox") || out.text.contains("jail"),
+            "{}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("leaked"),
+            "host fallback leaked output: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("sandbox: host"),
+            "host fallback tag: {}",
+            out.text
+        );
+    }
+
     /// REQ-3.25 INV-13 jail blocks writes outside cwd when a backend exists.
     #[tokio::test]
     async fn req_3_25_jail_blocks_outside_write() {

@@ -197,7 +197,21 @@ mod tests {
     fn req_3_20_agents_md() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("AGENTS.md"), "use rust").unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "DO_NOT_READ_CLAUDE").unwrap();
         let text = load_agents_md(dir.path());
         assert!(text.contains("use rust"));
+        assert!(!text.contains("DO_NOT_READ_CLAUDE"));
+    }
+
+    /// REQ-3.20 AGENTS.md over 16,000 chars is truncated and marked; CLAUDE.md is not read.
+    #[test]
+    fn req_3_20_agents_md_truncates_at_16k() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "a".repeat(20_000)).unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "DO_NOT_READ_CLAUDE").unwrap();
+        let text = load_agents_md(dir.path());
+        assert!(text.contains("[AGENTS.md truncated]"));
+        assert!(text.len() <= 16_000 + "\n[AGENTS.md truncated]".len());
+        assert!(!text.contains("DO_NOT_READ_CLAUDE"));
     }
 }

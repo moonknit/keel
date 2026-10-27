@@ -14,9 +14,8 @@ pub struct LlmSettings {
 impl LlmSettings {
     /// REQ-3.8: CLI flags later overlay this. Env is the process source of truth.
     pub fn from_env() -> Result<Self> {
-        let model = std::env::var("LLM_MODEL").map_err(|_| {
-            KeelError::Msg("LLM_MODEL is required".into())
-        })?;
+        let model = std::env::var("LLM_MODEL")
+            .map_err(|_| KeelError::Msg("LLM_MODEL is required".into()))?;
         Ok(Self {
             model,
             base_url: std::env::var("LLM_BASE_URL")

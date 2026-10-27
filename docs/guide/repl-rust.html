@@ -1,0 +1,1385 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>keel REPL Rust 코드 읽기</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --card: #fffdf8;
+      --ink: #1f1b16;
+      --muted: #5c564c;
+      --line: #d9d1c3;
+      --accent: #2f5d50;
+      --code-bg: #1e2430;
+      --code: #e8eef6;
+      --chip: #e7efe9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 17px/1.65 "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main {
+      max-width: 54rem;
+      margin: 0 auto;
+      padding: 2.2rem 1.2rem 4rem;
+    }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { font-size: 1.9rem; margin-bottom: 0.4rem; }
+    h2 {
+      margin-top: 2.4rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid var(--line);
+    }
+    h3 { margin-top: 1.6rem; }
+    p, li { color: var(--ink); }
+    .lead { color: var(--muted); font-size: 1.05rem; }
+    a { color: var(--accent); }
+    nav.toc {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1rem 1.2rem;
+      margin: 1.4rem 0 2rem;
+    }
+    nav.toc ol { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+    .note, .warn, .tip {
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      margin: 1rem 0;
+    }
+    .note { background: var(--chip); }
+    .warn { background: #f8ebe0; }
+    .tip { background: #e8eef6; }
+    code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    code { font-size: 0.88em; background: #efe8dc; padding: 0.1em 0.35em; border-radius: 4px; }
+    pre {
+      background: var(--code-bg);
+      color: var(--code);
+      padding: 1rem 1.1rem;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+    pre .c { color: #9aa7b8; }
+    pre .k { color: #c9a0dc; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95rem; }
+    th, td { border: 1px solid var(--line); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: #efe8dc; }
+    dl.terms dt { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.9rem; margin-top: 0.9rem; }
+    dl.terms dd { margin: 0.2rem 0 0 1rem; color: var(--muted); }
+    footer { margin-top: 3rem; color: var(--muted); font-size: 0.92rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>keel REPL Rust 코드 읽기</h1>
+  <p class="lead">
+    예전에 Rust를 잠깐만 본 사람을 기준으로,
+    REPL이 쓰는 실제 코드를 한 줄씩 풀어 읽습니다.
+    “무엇을 하는지”는
+    <a href="repl.html">흐름 안내</a>에 있고,
+    이 문서는 “이 문법이 왜 이렇게 생겼는지”에 더 깁니다.
+  </p>
+
+  <nav class="toc">
+    <strong>차례</strong>
+    <ol>
+      <li><a href="#how">이 문서를 읽는 법</a></li>
+      <li><a href="#files">파일이 나뉜 이유</a></li>
+      <li><a href="#grammar">코드를 막히게 하는 Rust 문법</a></li>
+      <li><a href="#main-top">main.rs 맨 위: use, mod, clap</a></li>
+      <li><a href="#main-fn">main과 run</a></li>
+      <li><a href="#session">session을 고르는 코드</a></li>
+      <li><a href="#agent-build">Agent를 조립하는 코드</a></li>
+      <li><a href="#approver">trait 구현: 키보드 승인</a></li>
+      <li><a href="#repl">repl 루프를 한 줄씩</a></li>
+      <li><a href="#slash">slash.rs: 문자열을 enum으로</a></li>
+      <li><a href="#last">last.rs: 이터레이터 체인</a></li>
+      <li><a href="#agent-run">agent.rs: 한 번의 대화를 도는 코드</a></li>
+      <li><a href="#next">다음에 혼자 열어볼 곳</a></li>
+    </ol>
+  </nav>
+
+  <h2 id="how">1. 이 문서를 읽는 법</h2>
+  <p>
+    에디터에서
+    <code>crates/keel-cli/src/main.rs</code>를 열어 두고,
+    아래 코드를 원본과 대조하며 읽는 편이 좋습니다.
+    예시는 설명을 위해 줄인 곳이 있습니다. 빠진 줄이 있으면 원본이 정본입니다.
+  </p>
+  <div class="tip">
+    Rust는 “값이 누구 것인가”를 컴파일러가 검사합니다.
+    그래서 <code>clone()</code>, <code>&amp;</code>, <code>.to_string()</code>이
+    다른 언어보다 자주 보입니다.
+    이상해 보여도 대부분 “빌려 쓰기 / 복사해서 주기 / 소유권 넘기기” 중 하나입니다.
+  </div>
+
+  <h2 id="files">2. 파일이 나뉜 이유</h2>
+  <p>
+    <code>keel-cli</code> 바이너리의 입구는 <code>main.rs</code>입니다.
+    같은 폴더의 다른 <code>.rs</code>는 <code>mod 이름;</code>으로 붙는 모듈입니다.
+  </p>
+  <pre><span class="c">// crates/keel-cli/src/main.rs  위쪽</span>
+mod config;   <span class="c">// → config.rs</span>
+mod last;     <span class="c">// → last.rs</span>
+mod logging;  <span class="c">// → logging.rs</span>
+mod slash;    <span class="c">// → slash.rs</span></pre>
+  <table>
+    <tr><th>파일</th><th>읽는 포인트</th></tr>
+    <tr>
+      <td><code>main.rs</code></td>
+      <td>플래그 파싱, 기동, REPL 루프. 가장 먼저 볼 파일.</td>
+    </tr>
+    <tr>
+      <td><code>slash.rs</code></td>
+      <td><code>/new</code>, <code>/resume</code> 문자열을 enum으로 바꾸고 session을 갈아탑니다.</td>
+    </tr>
+    <tr>
+      <td><code>last.rs</code></td>
+      <td>저장된 대화에서 마지막 도구 출력을 찾습니다. 이터레이터 연습에 좋습니다.</td>
+    </tr>
+    <tr>
+      <td><code>config.rs</code> / <code>logging.rs</code></td>
+      <td>설정·로그. REPL 한 줄을 이해하는 데 필수는 아닙니다.</td>
+    </tr>
+    <tr>
+      <td><code>keel-core/src/agent.rs</code></td>
+      <td>엔터 이후의 본체. CLI가 만든 <code>Agent</code>가 여기서 돕니다.</td>
+    </tr>
+    <tr>
+      <td><code>keel-core/src/traits.rs</code></td>
+      <td><code>Model</code>, <code>Tool</code>, <code>Store</code>처럼 “역할만 정한 인터페이스”.</td>
+    </tr>
+    <tr>
+      <td><code>keel-core/src/types.rs</code></td>
+      <td><code>Event</code>, <code>Item</code>, <code>RunStatus</code> 같은 데이터 모양.</td>
+    </tr>
+  </table>
+  <p>
+    <code>mod slash;</code>를 쓰면 같은 crate 안에서는
+    <code>slash::parse_session_switch(...)</code>처럼 호출합니다.
+    <code>pub fn</code>만 crate 밖이나 다른 모듈에서 부를 수 있습니다.
+    <code>fn</code>만 있으면 그 파일(모듈) 전용입니다.
+  </p>
+
+  <h2 id="grammar">3. 코드를 막히게 하는 Rust 문법</h2>
+  <p>
+    여기 있는 것만 알면 이 프로젝트의 CLI 코드는 대부분 읽힙니다.
+    문법 책 순서가 아니라, 이 저장소에서 자주 나오는 순서입니다.
+  </p>
+
+  <h3>소유권, 빌림, 복사</h3>
+  <table>
+    <tr><th>코드</th><th>읽기</th></tr>
+    <tr>
+      <td><code>s</code></td>
+      <td>이 값을 <em>내가 가진다</em>. 다른 함수에 <code>s</code>를 넘기면 내 손에서 떠납니다(move).</td>
+    </tr>
+    <tr>
+      <td><code>&amp;s</code></td>
+      <td>읽기만 빌려 준다. 함수가 끝나도 <code>s</code>는 그대로 있다.</td>
+    </tr>
+    <tr>
+      <td><code>&amp;mut s</code></td>
+      <td>고칠 수 있게 빌려 준다. 같은 값을 동시에 두 곳에서 고칠 수는 없다.</td>
+    </tr>
+    <tr>
+      <td><code>s.clone()</code></td>
+      <td>같은 내용의 새 값을 만든다. 문자열·구조체를 두 곳에서 갖고 싶을 때.</td>
+    </tr>
+    <tr>
+      <td><code>s.to_string()</code> / <code>s.into()</code></td>
+      <td><code>&amp;str</code>(문자열 조각)을 소유하는 <code>String</code>으로 만든다.</td>
+    </tr>
+  </table>
+  <pre><span class="c">// 이 프로젝트에서 자주 보는 세 가지</span>
+fn pick_session(cwd: &amp;str, ...) <span class="c">// cwd는 빌려 읽기만</span>
+let session_id = session_id.to_string(); <span class="c">// &amp;str → 내가 가진 String</span>
+store.rename(&amp;session_id, name) <span class="c">// String을 넘기지 않고 내용만 빌려 줌</span></pre>
+  <div class="note">
+    <code>&amp;str</code>은 “어딘가에 있는 글자의 창”이고,
+    <code>String</code>은 “내가 들고 있는 글자 상자”입니다.
+    함수 인자로 읽기만 하면 <code>&amp;str</code>,
+    저장하거나 나중에 쓰려면 <code>String</code>으로 복사합니다.
+  </div>
+
+  <h3><code>Option</code>과 <code>Result</code>, 그리고 <code>?</code></h3>
+  <p>
+    Rust에는 <code>null</code>이 없습니다.
+    “있을 수도 없다”는 <code>Option&lt;T&gt;</code>,
+    “실패할 수도 있다”는 <code>Result&lt;T, E&gt;</code>입니다.
+  </p>
+  <pre>enum Option&lt;T&gt; { Some(T), None }
+enum Result&lt;T, E&gt; { Ok(T), Err(E) }</pre>
+  <table>
+    <tr><th>코드</th><th>읽기</th></tr>
+    <tr>
+      <td><code>if let Some(x) = ...</code></td>
+      <td>있으면 <code>x</code>로 풀고, 없으면 이 분기를 건너뛴다.</td>
+    </tr>
+    <tr>
+      <td><code>let x = y?;</code></td>
+      <td>
+        <code>y</code>가 <code>Ok</code>/<code>Some</code>이면 안을 꺼낸다.
+        아니면 지금 함수를 그 실패값으로 끝낸다.
+      </td>
+    </tr>
+    <tr>
+      <td><code>.unwrap()</code> / <code>.expect("...")</code></td>
+      <td>없다고 치고 꺼낸다. 없으면 패닉. 테스트나 “여기는 반드시 있다”에만.</td>
+    </tr>
+    <tr>
+      <td><code>.ok()</code></td>
+      <td><code>Result</code>를 <code>Option</code>으로. 에러 내용은 버린다.</td>
+    </tr>
+    <tr>
+      <td><code>.map_err(into)</code></td>
+      <td>에러 타입만 바꾼 뒤 그대로 <code>?</code>에 넘긴다.</td>
+    </tr>
+  </table>
+  <pre><span class="c">// main.rs  — Result를 받는 함수. 실패하면 호출한 쪽으로 올라간다.</span>
+async fn run() -&gt; Result&lt;()&gt; {
+    let cwd = std::env::current_dir()?;   <span class="c">// 실패면 run()이 Err로 끝</span>
+    ...
+    Ok(())                                <span class="c">// 성공. ()는 “값 없음”</span>
+}</pre>
+  <p>
+    <code>Result&lt;()&gt;</code>의 <code>()</code>는 빈 튜플입니다.
+    “일만 하고 돌려줄 값은 없다”는 뜻입니다.
+    <code>keel-cli</code>는 <code>anyhow::Result</code>를 씁니다.
+    여러 종류의 에러를 한 덩어리로 다루는 편의 타입입니다.
+    <code>keel-core</code>는 자기 <code>KeelError</code>를 씁니다.
+    CLI는 <code>into()</code>로 둘을 잇습니다.
+  </p>
+
+  <h3><code>match</code>와 패턴</h3>
+  <p>
+    <code>switch</code>보다 강합니다. 모든 경우를 써야 하고,
+    안의 값까지 꺼내서 이름을 붙일 수 있습니다.
+  </p>
+  <pre>match line.trim() {
+    "a" | "always" =&gt; Decision::Always,  <span class="c">// 둘 중 하나</span>
+    "n" | "no"     =&gt; Decision::Deny,
+    _              =&gt; Decision::Once,    <span class="c">// 그 외 전부. _ 는 “이름 안 붙임”</span>
+}
+
+<span class="c">// enum 안의 필드를 꺼내는 패턴</span>
+if let Event::TextDelta(s) = ev {
+    print!("{s}");   <span class="c">// ev가 TextDelta일 때만 s를 얻음</span>
+}</pre>
+
+  <h3><code>struct</code>, <code>enum</code>, <code>impl</code></h3>
+  <pre>struct Agent {            <span class="c">// 여러 칸을 가진 상자</span>
+    pub model: ...,       <span class="c">// pub = 다른 모듈에서도 이 칸을 볼 수 있음</span>
+    max_turns: u32,
+}
+
+enum RunStatus { Done, Interrupted, Error, Limit }  <span class="c">// 넷 중 하나</span>
+
+impl Agent {              <span class="c">// Agent에 함수를 붙임</span>
+    pub async fn run(&amp;self, ...) { ... }  <span class="c">// &amp;self = 상자를 빌려 읽음</span>
+}</pre>
+  <p>
+    <code>&amp;self</code>는 파이썬의 <code>self</code>와 비슷하되, 빌려 씁니다.
+    <code>self</code>만 있으면 호출 뒤에 그 값은 함수 안으로 들어갑니다.
+    이 코드의 <code>run</code>은 같은 <code>Agent</code>로 여러 줄을 처리하므로
+    항상 <code>&amp;self</code>입니다.
+  </p>
+
+  <h3><code>trait</code>과 <code>dyn</code>, <code>Arc</code></h3>
+  <p>
+    <code>trait</code>은 “이 함수들을 가진 타입이면 된다”는 역할입니다.
+    <code>dyn Model</code>은 “Model 역할을 하는 어떤 타입이든”입니다.
+    실제로는 OpenAI일 수도, 테스트용 가짜일 수도 있습니다.
+  </p>
+  <pre>let model: Arc&lt;dyn Model&gt; = if 테스트 {
+    Arc::new(ScriptedModel::...)
+} else {
+    Arc::new(OpenAiModel::from_env()?)
+};</pre>
+  <dl class="terms">
+    <dt>Arc&lt;T&gt;</dt>
+    <dd>
+      Atomic Reference Counted. 같은 값을 여러 곳이 나눠 갖는 손잡이입니다.
+      복제(<code>clone</code>)해도 내용이 복사되지 않고 카운트만 올라갑니다.
+      REPL과 에이전트가 같은 저장소를 볼 때 씁니다.
+    </dd>
+    <dt>Box&lt;T&gt;</dt>
+    <dd>
+      힙에 올려 둔 한 개의 값. <code>PolicyApprover</code> 안의
+      <code>inner: Box&lt;dyn Approver&gt;</code>가 이런 경우입니다.
+      안쪽 승인자가 키보드일 수도, 무조건 거부일 수도 있어서
+      크기를 컴파일 때 고정할 수 없습니다.
+    </dd>
+    <dt>Send + Sync</dt>
+    <dd>
+      다른 스레드/태스크로 보내도 되는 타입(<code>Send</code>),
+      동시에 빌려 읽어도 되는 타입(<code>Sync</code>).
+      <code>async</code> 작업에 넘기려면 이 두 표시가 필요합니다.
+    </dd>
+  </dl>
+
+  <h3><code>async</code> / <code>await</code> / <code>tokio::spawn</code></h3>
+  <p>
+    네트워크·키보드처럼 기다리는 일이 있으면 함수에 <code>async</code>를 붙입니다.
+    호출하는 쪽은 <code>.await</code>로 “여기서 결과가 올 때까지 이 작업은 양보”합니다.
+    프로그램 전체가 멈추는 것은 아닙니다. 런타임이 다른 작업을 돌립니다.
+  </p>
+  <pre>async fn repl(...) -&gt; Result&lt;()&gt; {
+    let status = agent.run(...).await?;   <span class="c">// 모델이 답할 때까지 이 줄에서 양보</span>
+}
+
+<span class="c">// 동시에 다른 일을 시키고 싶을 때</span>
+let printer = tokio::spawn(async move {
+    while let Some(ev) = rx.recv().await { ... }
+});</pre>
+  <div class="note">
+    <code>async move { ... }</code>의 <code>move</code>는
+    클로저가 바깥 변수를 <em>가져간다</em>는 뜻입니다.
+    프린터 작업이 <code>rx</code>를 가져가므로,
+    원래 함수는 더 이상 <code>rx</code>를 쓰면 안 됩니다.
+    그래서 <code>let (tx, mut rx)</code>로 만든 뒤
+    <code>tx</code>는 <code>agent.run</code>에,
+    <code>rx</code>는 프린터에 나눕니다.
+  </div>
+
+  <h3>매크로와 속성</h3>
+  <table>
+    <tr><th>보이는 것</th><th>역할</th></tr>
+    <tr><td><code>println!(...)</code></td><td>매크로. 함수처럼 보이지만 <code>!</code>가 붙습니다. 포맷 문자열을 컴파일 때 검사합니다.</td></tr>
+    <tr><td><code>format!("{} {}", a, b)</code></td><td>출력 대신 <code>String</code>을 만듭니다.</td></tr>
+    <tr><td><code>#[tokio::main]</code></td><td>속성. <code>async fn main</code>을 런타임이 돌릴 수 있게 감쌉니다.</td></tr>
+    <tr><td><code>#[derive(Parser)]</code></td><td>구조체에서 clap이 플래그 파서를 자동 생성합니다.</td></tr>
+    <tr><td><code>#[async_trait]</code></td><td>trait 안의 <code>async fn</code>을 지금 Rust가 소화하는 형태로 바꿔 줍니다.</td></tr>
+    <tr><td><code>vec![a, b]</code></td><td><code>Vec</code>(가변 배열)을 만드는 매크로.</td></tr>
+    <tr><td><code>matches!(x, Pattern)</code></td><td>패턴이면 <code>true</code>. <code>if let</code>을 한 줄로 줄인 형태.</td></tr>
+  </table>
+
+  <h2 id="main-top">4. main.rs 맨 위: use, mod, clap</h2>
+
+  <h3><code>use</code> — 이름을 짧게 쓰기</h3>
+  <pre><span class="c">// crates/keel-cli/src/main.rs</span>
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use keel_core::agent::Agent;
+use std::sync::Arc;
+use tokio::sync::mpsc;</pre>
+  <p>
+    <code>use 경로::이름;</code>은 “이 파일을 읽는 동안 짧은 이름만 쓰겠다”입니다.
+    <code>keel_core::agent::Agent</code>를 매번 쓰지 않고 <code>Agent</code>로 부릅니다.
+    crate 이름은 <code>Cargo.toml</code>의 <code>keel-core</code>가
+    코드에서는 밑줄 <code>keel_core</code>가 됩니다.
+  </p>
+
+  <h3>플래그를 구조체로 받기</h3>
+  <pre>#[derive(Parser)]
+#[command(name = "keel")]
+struct Cli {
+    #[arg(long)]
+    new: bool,                          <span class="c">// --new  → true/false</span>
+    #[arg(long)]
+    resume: Option&lt;Option&lt;String&gt;&gt;,    <span class="c">// 아래 설명</span>
+    #[arg(short = 'p', long)]
+    prompt: Option&lt;String&gt;,             <span class="c">// -p "..." 가 없으면 None</span>
+    #[arg(long)]
+    allow_edits: bool,
+    #[arg(long, default_value_t = false)]
+    r#continue: bool,                   <span class="c">// continue는 예약어라 r# 접두사</span>
+    #[command(subcommand)]
+    cmd: Option&lt;Cmd&gt;,                   <span class="c">// session list 같은 하위 명령</span>
+}</pre>
+  <p>
+    <code>Option&lt;Option&lt;String&gt;&gt;</code>이 낯설면 clap의 관용입니다.
+  </p>
+  <table>
+    <tr><th>입력</th><th><code>cli.resume</code></th></tr>
+    <tr><td>플래그 없음</td><td><code>None</code></td></tr>
+    <tr><td><code>--resume</code></td><td><code>Some(None)</code> — 켰지만 id는 안 줌</td></tr>
+    <tr><td><code>--resume abc</code></td><td><code>Some(Some("abc"))</code></td></tr>
+  </table>
+  <p>
+    그래서 나중에
+    <code>cli.resume.clone().flatten()</code>을 씁니다.
+    <code>flatten</code>은 <code>Option&lt;Option&lt;T&gt;&gt;</code>을
+    <code>Option&lt;T&gt;</code>로 납작하게 만듭니다.
+    두 번째 <code>None</code>(플래그만 있음)도 그냥 “id 없음”이 됩니다.
+    <code>clone()</code>은 <code>parse</code>가 만든 <code>Cli</code>를
+    나중에 또 쓰려고 소유권을 빼앗지 않기 위함입니다.
+  </p>
+  <p>
+    하위 명령은 중첩 enum입니다.
+    <code>keel session list --all</code>은
+    <code>Cmd::Session { action: SessionCmd::List { all: true } }</code>가 됩니다.
+  </p>
+  <pre>#[derive(Subcommand)]
+enum Cmd {
+    Session {
+        #[command(subcommand)]
+        action: SessionCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    List { all: bool },
+    Show { id: String },
+    Rm { id: String },
+}</pre>
+
+  <h2 id="main-fn">5. main과 run</h2>
+  <pre>#[tokio::main]
+async fn main() {
+    let _ = dotenvy::dotenv();          <span class="c">// .env를 환경 변수로. 실패해도 무시</span>
+    if let Err(e) = run().await {
+        eprintln!("{e}");               <span class="c">// stderr로 에러 출력</span>
+        std::process::exit(1);
+    }
+}</pre>
+  <p>
+    <code>let _ = ...</code>는 “반환값을 쓰지는 않겠다”입니다.
+    <code>dotenv()</code>는 파일이 없으면 에러를 돌리지만,
+    키가 이미 환경에 있으면 파일 없이도 동작하므로 여기선 버립니다.
+  </p>
+  <p>
+    <code>main</code>은 <code>Result</code>를 돌려주지 않습니다.
+    실패를 프로세스 종료 코드로 바꿉니다.
+    실제 일은 <code>run()</code>에 모아 두어
+    <code>?</code>를 편하게 쓰게 합니다.
+  </p>
+  <pre>async fn run() -&gt; Result&lt;()&gt; {
+    let cli = Cli::parse();                       <span class="c">// argv → Cli</span>
+    let home = keel_home();
+    std::fs::create_dir_all(&amp;home).ok();          <span class="c">// 실패해도 계속</span>
+    let _logging = logging::init(&amp;home)?;         <span class="c">// 가드가 살아 있는 동안 로그</span>
+    let db = SqliteStore::open(&amp;home.join("keel.db"))?;
+    let cwd = std::env::current_dir()?;
+    let cwd_s = cwd.to_string_lossy().into_owned();
+    let mut cfg = config::load(&amp;home, &amp;cwd)?;
+    ...
+}</pre>
+  <dl class="terms">
+    <dt>home.join("keel.db")</dt>
+    <dd>
+      <code>PathBuf</code>에 파일 이름을 붙입니다.
+      <code>&amp;home</code>을 넘기는 이유는 <code>join</code>이
+      <code>&amp;Path</code>를 받기 때문입니다. <code>home</code>은 그대로 둡니다.
+    </dd>
+    <dt>to_string_lossy().into_owned()</dt>
+    <dd>
+      경로는 OS 문자열이라 UTF-8이 아닐 수 있습니다.
+      <code>to_string_lossy</code>는 깨진 글자를 <code>�</code>로 바꾼
+      <code>Cow&lt;str&gt;</code>(빌려 오거나, 필요하면 소유)를 줍니다.
+      <code>into_owned</code>가 그걸 진짜 <code>String</code>으로 만듭니다.
+      이후 DB·모델에 넘기는 값은 모두 <code>&amp;str</code>로 빌려 씁니다.
+    </dd>
+    <dt>let mut cfg</dt>
+    <dd>
+      기본은 불변입니다. 신뢰 확인 뒤에
+      <code>cfg.needs_confirm = false</code>로 고치므로 <code>mut</code>가 필요합니다.
+    </dd>
+    <dt>let _logging = ...</dt>
+    <dd>
+      <code>LogGuard</code>를 변수에 붙잡아 둡니다.
+      밑줄은 “이름은 안 쓰지만 값은 살려 둔다”입니다.
+      <code>run</code>이 끝나는 순간 <code>Drop</code>이 호출되어 로그를 flush합니다.
+      <code>let _ = logging::init(...)?</code>로 쓰면
+      그 줄에서 바로 버려져 로거가 먼저 닫힙니다.
+    </dd>
+  </dl>
+
+  <h3>홈 디렉터리</h3>
+  <pre>fn keel_home() -&gt; PathBuf {
+    if let Ok(h) = std::env::var("KEEL_HOME") {
+        return PathBuf::from(h);        <span class="c">// 환경 변수가 있으면 즉시 반환</span>
+    }
+    dirs_home().join(".keel")           <span class="c">// 마지막 식이 반환값. return 생략</span>
+}</pre>
+  <p>
+    Rust 함수의 <em>마지막 식</em>에 세미콜론이 없으면 그 값이 반환입니다.
+    <code>return</code>은 중간에 나갈 때 더 자주 씁니다.
+    <code>std::env::var</code>은 <code>Result&lt;String, VarError&gt;</code>라서
+    <code>if let Ok(h)</code>로 성공만 받습니다.
+  </p>
+
+  <h3>하위 명령이면 여기서 끝</h3>
+  <pre>match cli.cmd {
+    Some(Cmd::Session { action }) =&gt; {
+        return session_cmd(&amp;db, &amp;cwd_s, action).await;
+    }
+    None =&gt; {}                          <span class="c">// REPL/print로 계속</span>
+}</pre>
+  <p>
+    <code>Cmd::Session { action }</code>은
+    “이 갈래이고, 안의 <code>action</code>을 꺼내 쓰겠다”는 패턴입니다.
+    <code>return ...await</code>이므로
+    <code>session list</code>를 치면 REPL에 들어가지 않습니다.
+  </p>
+
+  <h3>print 모드와 REPL 분기</h3>
+  <pre>let print = cli.prompt.clone();
+let allow_edits = cli.allow_edits;
+if let Some(prompt) = print {
+    let code = run_print(&amp;db, &amp;session.meta.id, &amp;cwd_s, &amp;prompt, allow_edits, &amp;cfg).await?;
+    std::process::exit(code);
+}
+repl(&amp;db, &amp;session.meta.id, &amp;cwd, allow_edits, &amp;cfg, &amp;model_name).await</pre>
+  <p>
+    <code>cli.prompt</code>는 <code>Option&lt;String&gt;</code>입니다.
+    <code>clone()</code>하는 이유: 아래에서 <code>cli</code>를 더 쓸 수도 있고,
+    <code>if let Some(prompt)</code>가 <code>String</code>을 꺼내 가면
+    원본 <code>cli.prompt</code>는 빈 자리가 됩니다.
+    지금은 복제본을 소비합니다.
+  </p>
+  <p>
+    <code>run_print</code>는 <code>i32</code> 종료 코드를 돌립니다.
+    <code>repl</code>은 <code>Result&lt;()&gt;</code>라서
+    함수의 마지막 식으로 그대로 올라갑니다.
+    둘의 반환 타입이 다릅니다. 그래서 print 쪽은
+    <code>exit</code>로 프로세스를 끝냅니다.
+  </p>
+
+  <h2 id="session">6. session을 고르는 코드</h2>
+  <pre>async fn pick_session(
+    db: &amp;SqliteStore,                   <span class="c">// 빌려 씀. 함수가 저장소를 소유하지 않음</span>
+    cwd: &amp;str,
+    model: &amp;str,
+    cli: &amp;Cli,
+) -&gt; Result&lt;keel_core::WorkingSession&gt; {
+    if cli.new {
+        return db.create_session(cwd, model).await.map_err(into);
+    }
+    slash::resume_session(db, cwd, model, cli.resume.clone().flatten().as_deref())
+        .await
+        .map_err(into)
+}</pre>
+  <p>
+    한 줄에 문법이 여러 개 겹칩니다. 안에서부터 읽습니다.
+  </p>
+  <ol>
+    <li><code>cli.resume.clone()</code> — <code>Option&lt;Option&lt;String&gt;&gt;</code> 복사.</li>
+    <li><code>.flatten()</code> — <code>Option&lt;String&gt;</code>.</li>
+    <li><code>.as_deref()</code> — <code>Option&lt;&amp;str&gt;</code>.
+      <code>String</code>을 빌려 <code>&amp;str</code>로 봅니다.
+      <code>resume_session</code>이 <code>id: Option&lt;&amp;str&gt;</code>를 받기 때문입니다.</li>
+    <li><code>.await</code> — 비동기 함수의 결과(<code>keel_core::Result&lt;...&gt;</code>).</li>
+    <li><code>.map_err(into)</code> — 에러만 <code>anyhow::Error</code>로 변환.
+      <code>into</code>는 아래 작은 함수입니다.</li>
+  </ol>
+  <pre>fn into(e: keel_core::KeelError) -&gt; anyhow::Error {
+    anyhow::anyhow!(e.to_string())
+}</pre>
+  <p>
+    <code>.map_err(into)</code>는
+    <code>.map_err(|e| into(e))</code>와 같습니다.
+    함수 이름만 넘기면 클로저를 생략할 수 있습니다.
+  </p>
+  <p>
+    <code>--new</code>가 아니면 전부 <code>resume_session</code>으로 갑니다.
+    id가 있으면 그걸 열고, 없으면 이 cwd의 최근 session,
+    그것도 없으면 새로 만듭니다. 본문은 <a href="#slash">slash.rs</a>에 있습니다.
+  </p>
+
+  <h2 id="agent-build">7. Agent를 조립하는 코드</h2>
+  <p>
+    <code>build_agent</code>는 화면이 아니라 상자만 만듭니다.
+    반환 타입은 <code>Result&lt;Agent&gt;</code>입니다.
+  </p>
+  <pre>async fn build_agent(
+    store: Arc&lt;dyn Store&gt;,              <span class="c">// 이미 손잡이로 받음</span>
+    cwd: &amp;std::path::Path,
+    print: bool,
+    allow_edits: bool,
+    cfg: &amp;config::KeelConfig,
+) -&gt; Result&lt;Agent&gt; {
+    let skills = discover(cwd);
+    let mut tools = coding_tools();     <span class="c">// Vec&lt;Arc&lt;dyn Tool&gt;&gt;</span>
+    tools.push(Arc::new(SkillTool { skills: skills.clone() }));
+    tools.extend(attach_mcp_tools(cfg).await);
+    ...
+}</pre>
+  <dl class="terms">
+    <dt>let mut tools</dt>
+    <dd>
+      <code>push</code> / <code>extend</code>로 길이가 늘어나므로 <code>mut</code>.
+    </dd>
+    <dt>Arc::new(SkillTool { ... })</dt>
+    <dd>
+      구조체 리터럴입니다. 칸 이름과 값을 맞춰 넣습니다.
+      <code>skills.clone()</code>은 스킬 목록 <code>Vec</code>을 복사합니다.
+      아래 시스템 프롬프트가 같은 목록을 또 쓰기 때문입니다.
+    </dd>
+    <dt>tools.extend(...)</dt>
+    <dd>
+      다른 <code>Vec</code>의 원소를 뒤에 이어 붙입니다.
+      MCP 도구가 없거나 아직 신뢰 전이면 빈 벡터라 아무 일도 없습니다.
+    </dd>
+  </dl>
+
+  <h3>모델 고르기 — 두 타입을 하나로</h3>
+  <pre>let model: Arc&lt;dyn Model&gt; = if std::env::var("KEEL_SCRIPTED").ok().as_deref() == Some("1") {
+    Arc::new(ScriptedModel::new(vec![vec![
+        ModelEvent::TextDelta("ok".into()),
+        ModelEvent::ItemDone(keel_core::Item::text(Role::Assistant, "ok")),
+        ModelEvent::Completed { usage: Usage::default() },
+    ]]))
+} else {
+    Arc::new(OpenAiModel::from_env().map_err(into)?)
+};</pre>
+  <p>
+    <code>if</code>의 두 갈래 타입은 원래 다릅니다
+    (<code>ScriptedModel</code> vs <code>OpenAiModel</code>).
+    둘 다 <code>Model</code> trait을 구현하므로
+    <code>Arc&lt;dyn Model&gt;</code>로 올리면 한 변수에 담깁니다.
+    왼쪽 타입 표기 <code>let model: Arc&lt;dyn Model&gt;</code>가 그 변환을 강제합니다.
+  </p>
+  <p>
+    <code>std::env::var(...).ok().as_deref() == Some("1")</code>도 겹친 표현입니다.
+  </p>
+  <ol>
+    <li><code>var</code> → <code>Result&lt;String, _&gt;</code></li>
+    <li><code>.ok()</code> → 없으면 <code>None</code>, 있으면 <code>Some(String)</code></li>
+    <li><code>.as_deref()</code> → <code>Option&lt;&amp;str&gt;</code>.
+      <code>Some("1")</code>과 비교하려면 <code>String</code>이 아니라 조각이 필요합니다.</li>
+  </ol>
+  <p>
+    <code>"ok".into()</code>는 <code>&amp;str</code> → <code>String</code>입니다.
+    받는 칸이 <code>String</code>이면 컴파일러가 변환을 고릅니다.
+    <code>Usage::default()</code>는
+    <code>#[derive(Default)]</code>가 만든 “칸마다 0/빈 값”입니다.
+  </p>
+
+  <h3>승인자 고르기</h3>
+  <pre>let policy = Policy {
+    allow_edits,
+    print_mode: print,
+    ..Policy::default()                 <span class="c">// 나머지 칸은 기본값</span>
+};
+let approver: Arc&lt;dyn Approver&gt; = if print {
+    Arc::new(PolicyApprover {
+        policy,
+        inner: Box::new(AlwaysDeny),    <span class="c">// -p 는 키보드를 묻지 않음</span>
+    })
+} else {
+    Arc::new(PolicyApprover {
+        policy,
+        inner: Box::new(StdinApprover),
+    })
+};</pre>
+  <p>
+    <code>..Policy::default()</code>는 구조체 업데이트 문법입니다.
+    명시한 칸만 덮고 나머지는 기본값 복사입니다.
+  </p>
+  <p>
+    <code>if print</code>의 두 갈래는 둘 다
+    <code>PolicyApprover&lt;...&gt;</code>처럼 보이지만
+    <code>inner</code>의 구체 타입이 다릅니다.
+    그래서 또 <code>Arc&lt;dyn Approver&gt;</code>로 올립니다.
+  </p>
+  <p>
+    마지막은 필드 이름이 변수 이름과 같은 단축 문법입니다.
+  </p>
+  <pre>Ok(Agent {
+    model,          <span class="c">// model: model</span>
+    tools,
+    store,
+    approver,
+    assembler: Arc::new(ContextAssembler::default()),
+    max_turns: 50,
+    system,
+})</pre>
+
+  <h2 id="approver">8. trait 구현: 키보드 승인</h2>
+  <p>
+    데이터가 없는 타입은 빈 구조체로 둡니다.
+    “타입만 있고 칸은 없다”는 표식입니다.
+  </p>
+  <pre>struct StdinApprover;
+
+#[async_trait]
+impl Approver for StdinApprover {
+    async fn approve(&amp;self, req: &amp;ApprovalRequest) -&gt; Decision {
+        eprintln!(
+            "  allow {} {}? [y]es [a]lways [n]o",
+            req.name, req.args_summary
+        );
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&amp;mut line);
+        match line.trim() {
+            "a" | "always" =&gt; Decision::Always,
+            "n" | "no" =&gt; Decision::Deny,
+            _ =&gt; Decision::Once,        <span class="c">// 빈 줄, y, 기타 → 이번만 허용</span>
+        }
+    }
+}</pre>
+  <dl class="terms">
+    <dt>impl Approver for StdinApprover</dt>
+    <dd>
+      “<code>StdinApprover</code>는 <code>Approver</code> 역할을 한다”.
+      trait에 적힌 함수를 여기 모두 구현해야 컴파일이 됩니다.
+    </dd>
+    <dt>&amp;self, req: &amp;ApprovalRequest</dt>
+    <dd>
+      둘 다 읽기 빌림. 승인자가 요청을 삼키지 않습니다.
+    </dd>
+    <dt>let mut line = String::new()</dt>
+    <dd>
+      빈 문자열 상자. <code>read_line</code>이 끝에 붙여 넣으므로 <code>mut</code>이고
+      <code>&amp;mut line</code>으로 넘깁니다.
+    </dd>
+    <dt>line.trim()</dt>
+    <dd>
+      앞뒤 공백과 개행을 뺀 <code>&amp;str</code>.
+      원본 <code>line</code>은 그대로입니다. 창만 좁힙니다.
+    </dd>
+  </dl>
+  <p>
+    trait 정의 쪽은 더 짧습니다. 역할만 있고 구현은 없습니다.
+  </p>
+  <pre><span class="c">// crates/keel-core/src/traits.rs</span>
+#[async_trait]
+pub trait Approver: Send + Sync {
+    async fn approve(&amp;self, req: &amp;ApprovalRequest) -&gt; Decision;
+}</pre>
+  <p>
+    <code>: Send + Sync</code>는 슈퍼트레이트입니다.
+    “Approver이려면 동시에 저 둘도 만족해야 한다”는 뜻입니다.
+  </p>
+
+  <h2 id="repl">9. repl 루프를 한 줄씩</h2>
+  <pre>async fn repl(
+    db: &amp;SqliteStore,
+    session_id: &amp;str,
+    cwd: &amp;std::path::Path,
+    allow_edits: bool,
+    cfg: &amp;config::KeelConfig,
+    model: &amp;str,
+) -&gt; Result&lt;()&gt; {
+    let store: Arc&lt;dyn Store&gt; = Arc::new(SqliteStore::open(&amp;keel_home().join("keel.db"))?);
+    let _ = db;                         <span class="c">// 인자는 받았지만 여기서는 안 씀. 경고 억제</span>
+    let agent = build_agent(store.clone(), cwd, false, allow_edits, cfg).await?;
+    let mut rl = DefaultEditor::new()?;
+    let mut last_tool = String::new();
+    let mut session_id = session_id.to_string();
+    let cwd_s = cwd.to_string_lossy().into_owned();</pre>
+  <p>
+    <code>store.clone()</code>은 SQLite를 복사하지 않습니다.
+    <code>Arc</code> 손잡이만 하나 더 만듭니다.
+    하나는 <code>agent</code> 안으로 들어가고,
+    하나는 REPL이 <code>/name</code>, <code>/session</code>, <code>/last</code>에 씁니다.
+  </p>
+  <p>
+    인자 <code>session_id: &amp;str</code>는 빌려 온 창입니다.
+    루프 안에서 <code>/new</code>로 id를 바꿔야 하므로
+    <code>let mut session_id = session_id.to_string()</code>으로
+    같은 이름의 <em>내가 가진 문자열</em>을 새로 만듭니다.
+    안쪽 이름이 바깥 인자를 가립니다(shadowing).
+    Rust에서 매우 흔한 패턴입니다.
+  </p>
+
+  <h3>한 줄 읽기</h3>
+  <pre>loop {
+    let line = match rl.readline("&gt; ") {
+        Ok(l) =&gt; l,
+        Err(_) =&gt; break,                <span class="c">// Ctrl-D 등. _ 는 에러 값 무시</span>
+    };
+    let line = line.trim().to_string(); <span class="c">// 또 shadowing. 이번엔 소유 String</span>
+    if line.is_empty() { continue; }
+    if line == "/exit" { break; }</pre>
+  <p>
+    <code>loop</code>는 무한 루프입니다. <code>break</code>로만 나갑니다.
+    <code>continue</code>는 이번 바퀴만 건너뛰고 프롬프트로 돌아갑니다.
+  </p>
+  <p>
+    첫 <code>line</code>은 rustyline이 준 <code>String</code>입니다.
+    <code>trim()</code>은 <code>&amp;str</code>을 돌려주므로,
+    루프 전체에 들고 있으려면 <code>to_string()</code>으로 다시 소유합니다.
+    빈 줄 비교·슬래시 비교가 여러 번이라 매번 trim 하지 않으려는 선택입니다.
+  </p>
+
+  <h3>슬래시 분기</h3>
+  <pre>if line == "/help" {
+    println!("/new /resume /name /session /skills /last /help /exit");
+    continue;
+}
+if let Some(switch) = slash::parse_session_switch(&amp;line) {
+    match slash::apply_session_switch(store.as_ref(), &amp;session_id, &amp;cwd_s, model, switch).await {
+        Ok(new_id) =&gt; {
+            session_id = new_id;        <span class="c">// 다음 바퀴부터 이 id</span>
+            println!("{session_id}");
+        }
+        Err(e) =&gt; eprintln!("{e}"),
+    }
+    continue;
+}</pre>
+  <p>
+    <code>parse_session_switch</code>는
+    <code>/new</code>가 아니면 <code>None</code>을 줍니다.
+    <code>if let Some(switch)</code>이므로
+    일반 문장은 이 분기를 그냥 지나갑니다.
+  </p>
+  <p>
+    <code>store.as_ref()</code>는
+    <code>Arc&lt;dyn Store&gt;</code>에서
+    <code>&amp;dyn Store</code>를 꺼냅니다.
+    <code>apply_session_switch</code>가 <code>&amp;dyn Store</code>를 받기 때문입니다.
+    <code>Arc</code> 전체를 넘길 필요가 없습니다.
+  </p>
+  <pre>if let Some(name) = line.strip_prefix("/name ") {
+    store.rename(&amp;session_id, name).await.map_err(into)?;
+    continue;
+}</pre>
+  <p>
+    <code>strip_prefix</code>는
+    접두사가 있으면 그 뒤 조각(<code>&amp;str</code>)을 <code>Some</code>으로,
+    아니면 <code>None</code>을 줍니다.
+    <code>"/name 제목"</code>에서 <code>name</code>은 <code>"제목"</code>입니다.
+    공백까지 접두사에 들어 있습니다.
+  </p>
+
+  <h3>스킬 줄을 프롬프트로 바꾸기</h3>
+  <pre>let prompt = if let Some(rest) = line.strip_prefix("/skill:") {
+    let name = rest.split_whitespace().next().unwrap_or("");
+    if let Some(meta) = discover(cwd).into_iter().find(|s| s.name == name) {
+        keel_skills::skill_body(&amp;meta)
+    } else {
+        format!("unknown skill {name}")
+    }
+} else {
+    line                                <span class="c">// 일반 문장. String을 그대로 넘김</span>
+};</pre>
+  <p>
+    바깥 <code>if let</code>의 두 갈래가 모두 <code>String</code>을 만들어야
+    <code>let prompt</code>에 담깁니다.
+    <code>else { line }</code>은 소유권을 넘깁니다.
+    이 줄 이후에는 예전 <code>line</code>을 쓰면 안 됩니다.
+    실제로도 더 이상 쓰지 않습니다.
+  </p>
+  <p>
+    <code>rest.split_whitespace().next()</code>는
+    공백으로 나눈 첫 단어입니다.
+    <code>/skill:foo extra</code>면 <code>foo</code>만 씁니다.
+    <code>unwrap_or("")</code>는 단어가 없을 때 빈 문자열입니다.
+  </p>
+  <p>
+    <code>into_iter().find(|s| s.name == name)</code>에서
+    <code>|s| ...</code>는 클로저입니다.
+    <code>s</code>는 스킬 메타. <code>== name</code>이면 그 원소를 줍니다.
+    <code>into_iter</code>는 벡터를 소비하며 순회합니다.
+    목록을 한 번만 쓰므로 괜찮습니다.
+  </p>
+
+  <h3>한 chat을 돌리기 직전 — 채널, 취소, 프린터</h3>
+  <pre>let (tx, mut rx) = mpsc::unbounded_channel();
+let cancel = CancellationToken::new();
+let cancel_c = cancel.clone();
+tokio::spawn(async move {
+    tokio::signal::ctrl_c().await.ok();
+    cancel_c.cancel();
+});
+let printer = tokio::spawn(async move {
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            Event::TextDelta(s) =&gt; {
+                print!("{s}");
+                let _ = io::stdout().flush();
+            }
+            Event::ToolStart { name, args } =&gt; println!("\n▸ {name}  {args}"),
+            Event::ToolEnd { ok, .. } =&gt; {
+                println!("  {}", if ok { "✓" } else { "✗" });
+            }
+            Event::RunEnd { .. } =&gt; println!(),
+            _ =&gt; {}                     <span class="c">// 나머지 이벤트는 화면 무시</span>
+        }
+    }
+});</pre>
+  <dl class="terms">
+    <dt>(tx, mut rx)</dt>
+    <dd>
+      다중 생산자, 단일 소비자 채널입니다.
+      <code>tx</code>(송신)는 <code>clone</code>해서 여러 곳에 줄 수 있고,
+      <code>rx</code>(수신)는 하나라 <code>mut</code>로 받아 둡니다.
+      <code>unbounded</code>는 큐 길이 제한이 없다는 뜻입니다.
+    </dd>
+    <dt>cancel.clone()</dt>
+    <dd>
+      토큰도 손잡이입니다. 같은 취소를 Ctrl-C 작업과 <code>agent.run</code>이 봅니다.
+      <code>cancel_c</code>를 <code>move</code>로 가져가게 하려고 복제합니다.
+    </dd>
+    <dt>while let Some(ev) = rx.recv().await</dt>
+    <dd>
+      이벤트가 오면 <code>Some</code>, 송신자가 모두 떨어지면 <code>None</code> → 루프 종료.
+      <code>agent.run</code>이 끝나 <code>tx</code>가 버려지면 프린터가 끝납니다.
+    </dd>
+    <dt>Event::ToolEnd { ok, .. }</dt>
+    <dd>
+      <code>ok</code>만 쓰고 나머지 칸(<code>name</code>, <code>millis</code>, …)은
+      <code>..</code>로 버립니다.
+    </dd>
+    <dt>if ok { "✓" } else { "✗" }</dt>
+    <dd>
+      두 갈래가 같은 타입(<code>&amp;str</code>)이면 <code>if</code>가 식입니다.
+    </dd>
+  </dl>
+
+  <h3>돌리고, 마지막 도구를 기억하고, 나가며 잠금 해제</h3>
+  <pre>let status = agent
+    .run(&amp;session_id, &amp;prompt, &amp;cwd_s, cancel, tx)
+    .await
+    .map_err(into)?;
+let _ = printer.await;                  <span class="c">// 프린터가 끝날 때까지 기다림</span>
+if let Ok(ws) = store.open_session(&amp;session_id).await {
+    if let Some(output) = last::last_tool_output(&amp;ws) {
+        last_tool = output.to_string();
+    }
+}
+if status == RunStatus::Interrupted {
+    println!("interrupted");
+}
+<span class="c">// loop 끝</span>
+store.close(&amp;session_id).await.map_err(into)?;
+Ok(())</pre>
+  <p>
+    <code>printer.await</code>는
+    <code>JoinHandle</code>이 주는
+    <code>Result&lt;(), JoinError&gt;</code>입니다.
+    프린터가 패닉하면 <code>Err</code>이지만,
+    화면 출력 실패로 REPL을 죽일 필요는 없어서 <code>let _ =</code>로 버립니다.
+  </p>
+  <p>
+    <code>last_tool_output</code>은 <code>Option&lt;&amp;str&gt;</code>입니다.
+    세션 안의 문자열을 빌려 줍니다.
+    다음 바퀴까지 들고 있으려면
+    <code>to_string()</code>으로 내 상자에 복사해야 합니다.
+    <code>ws</code>는 이 <code>if</code> 블록이 끝나면 사라집니다.
+  </p>
+  <p>
+    <code>RunStatus</code>는
+    <code>#[derive(PartialEq)]</code>라서 <code>==</code>로 비교할 수 있습니다.
+    derive가 없으면 직접 <code>eq</code>를 구현해야 합니다.
+  </p>
+
+  <h2 id="slash">10. slash.rs: 문자열을 enum으로</h2>
+  <p>
+    파일 맨 위 <code>//!</code>는 crate/모듈 문서 주석입니다.
+    <code>//</code>는 일반 주석입니다.
+  </p>
+  <pre>#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSwitch {
+    New,
+    Resume(Option&lt;String&gt;),             <span class="c">// 갈래가 값을 가짐</span>
+}
+
+pub fn parse_session_switch(line: &amp;str) -&gt; Option&lt;SessionSwitch&gt; {
+    if line == "/new" {
+        return Some(SessionSwitch::New);
+    }
+    if line == "/resume" {
+        return Some(SessionSwitch::Resume(None));
+    }
+    let rest = line.strip_prefix("/resume ")?;
+    let id = rest.split_whitespace().next().unwrap_or("");
+    if id.is_empty() {
+        Some(SessionSwitch::Resume(None))
+    } else {
+        Some(SessionSwitch::Resume(Some(id.to_string())))
+    }
+}</pre>
+  <p>
+    여기 <code>?</code>는 <code>Result</code>가 아니라 <code>Option</code>에 붙었습니다.
+    <code>strip_prefix</code>가 <code>None</code>이면
+    함수 전체가 <code>None</code>으로 끝납니다.
+    “<code>/resume </code>로 시작하지 않으면 이 함수의 일이 아니다”
+    를 한 글자로 쓴 것입니다.
+  </p>
+  <p>
+    <code>/new extra</code>는 첫 분기에도, prefix에도 안 걸려
+    <code>None</code>입니다. 그러면 REPL은 일반 프롬프트로 모델에 보냅니다.
+  </p>
+
+  <h3>실패하면 이전 session을 다시 잠그기</h3>
+  <pre>pub async fn apply_session_switch(...) -&gt; Result&lt;String&gt; {
+    store.close(current_id).await?;
+    let opened = match switch {
+        SessionSwitch::New =&gt; store.create_session(cwd, model).await,
+        SessionSwitch::Resume(id) =&gt; {
+            resume_session(store, cwd, model, id.as_deref()).await
+        }
+    };
+    match opened {
+        Ok(ws) =&gt; Ok(ws.meta.id),
+        Err(e) =&gt; {
+            if store.open_session(current_id).await.is_err() {
+                return Err(KeelError::Msg(format!(
+                    "{e}; also failed to restore session {current_id}"
+                )));
+            }
+            Err(e)
+        }
+    }
+}</pre>
+  <p>
+    <code>id.as_deref()</code> —
+    <code>Option&lt;String&gt;</code>을 <code>Option&lt;&amp;str&gt;</code>로.
+    <code>Resume(id)</code>에서 <code>id</code>는 패턴으로 꺼낸 값입니다.
+  </p>
+  <p>
+    새 session을 열기 전에 현재 것을 <code>close</code>합니다.
+    열기가 실패하면 예전 id를 다시 <code>open_session</code>합니다.
+    <code>.is_err()</code>는 내용이 아니라 실패 여부만 봅니다.
+    복구까지 실패하면 두 에러를 한 문자열로 합칩니다.
+    복구가 되면 원래 에러 <code>e</code>만 다시 올립니다.
+    호출한 REPL은 <code>eprintln</code>하고, <code>session_id</code>는 바꾸지 않습니다.
+  </p>
+  <p>
+    <code>resume_session</code> 본체:
+  </p>
+  <pre>if let Some(id) = id {
+    return store.open_session(id).await;
+}
+let list = store.list_sessions(Some(cwd), false).await?;
+if let Some(meta) = list.into_iter().next() {
+    store.open_session(&amp;meta.id).await
+} else {
+    store.create_session(cwd, model).await
+}</pre>
+  <p>
+    <code>Some(cwd)</code>는 <code>Option&lt;&amp;str&gt;</code>를 만듭니다.
+    “이 cwd만 보라”는 뜻입니다. <code>None</code>이면 전체입니다.
+    <code>into_iter().next()</code>는 첫 원소만 꺼내고 벡터는 소비합니다.
+    목록이 비면 <code>None</code> → 새로 만듭니다.
+  </p>
+
+  <h2 id="last">11. last.rs: 이터레이터 체인</h2>
+  <p>
+    한 함수가 이터레이터를 길게 이어 붙인 예입니다.
+    왼쪽에서 오른쪽으로, “다음 단계의 흐름”으로 읽습니다.
+  </p>
+  <pre>pub fn last_tool_output(session: &amp;WorkingSession) -&gt; Option&lt;&amp;str&gt; {
+    session
+        .chats
+        .iter()                         <span class="c">// 각 chat을 &amp;Chat 로</span>
+        .rev()                          <span class="c">// 최신 chat부터</span>
+        .flat_map(|c| c.items.iter().rev())  <span class="c">// chat 안의 item을 최신부터 펼침</span>
+        .find_map(|item| match &amp;item.kind {
+            ItemKind::ToolResult { output, .. } =&gt; Some(output.as_str()),
+            _ =&gt; None,
+        })
+}</pre>
+  <dl class="terms">
+    <dt>iter() vs into_iter()</dt>
+    <dd>
+      <code>iter()</code>는 빌려 순회합니다. <code>session</code>은 그대로입니다.
+      반환이 <code>&amp;str</code>인 이유이기도 합니다. 출력이 아직 session 안에 있습니다.
+    </dd>
+    <dt>rev()</dt>
+    <dd>
+      역순. “가장 최근 도구”를 찾고 싶어서 뒤부터 봅니다.
+    </dd>
+    <dt>flat_map</dt>
+    <dd>
+      각 chat이 item 이터레이터를 내놓으면, 그걸 한 줄로 펼칩니다.
+      <code>map</code>이면 “이터레이터의 이터레이터”가 됩니다.
+    </dd>
+    <dt>find_map</dt>
+    <dd>
+      앞에서부터 클로저를 적용해, 첫 <code>Some</code>을 반환하고 멈춥니다.
+      <code>ToolResult</code>가 아니면 <code>None</code>이라 다음 item으로 갑니다.
+    </dd>
+    <dt>match &amp;item.kind</dt>
+    <dd>
+      <code>kind</code>를 빌려 맞춥니다.
+      <code>output</code>은 <code>&amp;String</code>이 되고,
+      <code>.as_str()</code>가 <code>&amp;str</code>로 바꿉니다.
+    </dd>
+  </dl>
+  <p>
+    호출하는 쪽:
+  </p>
+  <pre>if let Some(output) = last::last_tool_output(&amp;ws) {
+    last_tool = output.to_string();     <span class="c">// 빌린 조각을 내 String에 복사</span>
+}</pre>
+  <p>
+    도구 결과가 아직 없으면 <code>None</code>이고,
+    <code>last_tool</code>은 이전 값을 유지합니다.
+    “이번 대화에 도구가 없으면 직전 출력을 그대로 보여 준다”가
+    <code>if let</code> 하나로 표현됩니다.
+  </p>
+
+  <h2 id="agent-run">12. agent.rs: 한 번의 대화를 도는 코드</h2>
+  <p>
+    CLI는 여기서부터 커널에 일을 맡깁니다.
+    시그니처만 먼저 읽어도 역할이 보입니다.
+  </p>
+  <pre><span class="c">// crates/keel-core/src/agent.rs</span>
+impl Agent {
+    pub async fn run(
+        &amp;self,                          <span class="c">// Agent는 그대로. 여러 번 호출</span>
+        session_id: &amp;str,
+        user_text: &amp;str,
+        cwd: &amp;str,
+        cancel: CancellationToken,      <span class="c">// 손잡이. 값으로 받아도 clone 가능</span>
+        events: mpsc::UnboundedSender&lt;Event&gt;,
+    ) -&gt; Result&lt;RunStatus&gt; {            <span class="c">// core의 Result = Result&lt;T, KeelError&gt;</span>
+        ...
+    }
+}</pre>
+  <p>
+    <code>events</code>는 송신 끝입니다.
+    에이전트가 <code>Event</code>를 넣고, REPL 프린터가 받습니다.
+    <code>send</code>는 수신자가 이미 죽었으면 실패합니다.
+    화면이 먼저 꺼진 경우라 여기선 <code>let _ = events.send(...)</code>로 버립니다.
+  </p>
+
+  <h3>시작: session 열고 user를 붙이기</h3>
+  <pre>let mut session = self.store.open_session(session_id).await?;
+let title = user_text.lines().next().unwrap_or(user_text);
+let chat = self.store.begin_chat(session_id, Some(title)).await?;
+let user = Item::text(crate::types::Role::User, user_text);
+self.store.append(&amp;chat.id, user.clone()).await?;
+session.chats.push({
+    let mut c = chat.clone();
+    c.items.push(user);
+    c
+});</pre>
+  <dl class="terms">
+    <dt>user_text.lines().next()</dt>
+    <dd>
+      여러 줄이면 첫 줄만 제목으로. 줄이 하나도 없으면(빈 문자열)
+      <code>unwrap_or(user_text)</code>가 원문 전체를 씁니다.
+    </dd>
+    <dt>crate::types::Role::User</dt>
+    <dd>
+      같은 crate의 <code>types</code> 모듈. 파일 위쪽 <code>use</code>에
+      <code>Role</code>이 없어서 경로를 직접 적었습니다.
+    </dd>
+    <dt>user.clone()</dt>
+    <dd>
+      같은 item을 DB에도 넣고, 메모리 <code>session</code>에도 넣습니다.
+      <code>append</code>가 <code>Item</code>을 값으로 받아 가져가므로
+      한 번 더 필요합니다.
+    </dd>
+    <dt>{ let mut c = ...; c }</dt>
+    <dd>
+      블록도 식입니다. 마지막 <code>c</code>가 <code>push</code>의 인자입니다.
+      임시 변수 이름을 바깥에 안 남깁니다.
+    </dd>
+  </dl>
+
+  <h3>턴 루프와 에러 갈래</h3>
+  <pre>for turn in 1..=self.max_turns {        <span class="c">// 1, 2, ... max_turns 포함</span>
+    if cancel.is_cancelled() {
+        ...
+        return Ok(RunStatus::Interrupted);
+    }
+    let model_events = match self.call_model(&amp;session, cancel.clone(), &amp;events).await {
+        Ok(ev) =&gt; ev,
+        Err(e) if is_overflow(&amp;e) =&gt; {  <span class="c">// 가드: 이 조건일 때만 이 갈래</span>
+            self.store.end_chat(&amp;chat.id, ChatStatus::Error, usage_sum).await?;
+            ...
+            return Err(e);
+        }
+        Err(e) =&gt; return Err(e),
+    };
+    ...
+}</pre>
+  <p>
+    <code>1..=n</code>은 양끝을 포함하는 범위입니다. <code>1..n</code>은 <code>n</code>을 빼니다.
+    <code>Err(e) if is_overflow(&amp;e)</code>는 match 가드입니다.
+    overflow면 chat을 Error로 닫고, 그 외 에러는 바로 올립니다.
+  </p>
+
+  <h3>모델 이벤트에서 tool call만 모으기</h3>
+  <pre>let calls: Vec&lt;(String, String, Value)&gt; = new_items
+    .iter()
+    .filter_map(|item| match &amp;item.kind {
+        ItemKind::ToolCall { call_id, name, args } =&gt; {
+            Some((call_id.clone(), name.clone(), args.clone()))
+        }
+        _ =&gt; None,
+    })
+    .collect();
+if calls.is_empty() {
+    self.store.end_chat(&amp;chat.id, ChatStatus::Done, usage_sum).await?;
+    ...
+    return Ok(RunStatus::Done);
+}</pre>
+  <p>
+    <code>filter_map</code>은 “없애거나(<code>None</code>), 꺼내거나(<code>Some</code>)”입니다.
+    텍스트 item은 버리고, tool call만 튜플로 모읍니다.
+    <code>clone</code>이 세 번인 이유:
+    <code>item.kind</code>는 빌려 보고 있고,
+    뒤 루프가 소유하는 <code>String</code>/<code>Value</code>가 필요하기 때문입니다.
+  </p>
+  <p>
+    타입 주석 <code>Vec&lt;(String, String, Value)&gt;</code>는 없어도 추론되지만,
+    세 칸이 무엇인지 읽기 쉽게 적혀 있습니다.
+    순서대로 call id, 도구 이름, JSON 인자입니다.
+  </p>
+
+  <h3>없는 도구, 거부, <code>if let ... else</code></h3>
+  <pre>let Some(tool) = self.find_tool(&amp;name) else {
+    let result = Item::tool_result(&amp;call_id, format!("unknown tool {name}"), true);
+    self.store.append(&amp;chat.id, result).await?;
+    continue;
+};</pre>
+  <p>
+    <code>let Some(x) = ... else { ... }</code>는
+    “있으면 <code>x</code>, 없으면 블록을 실행하고 이 스코프를 떠나라”입니다.
+    블록 안은 반드시 <code>continue</code> / <code>return</code> / <code>break</code>처럼
+    빠져나가야 합니다. 있으면 그 아래부터 <code>tool</code>을 씁니다.
+  </p>
+  <pre>if !matches!(tool.class(), ToolClass::Read)
+    &amp;&amp; self.approver.approve(&amp;req).await == Decision::Deny
+{
+    let result = Item::tool_result(&amp;call_id, "denied", true);
+    ...
+    continue;
+}</pre>
+  <p>
+    Read가 아니고, 승인이 Deny이면 실행하지 않습니다.
+    <code>matches!</code>는
+    <code>if let ToolClass::Read = tool.class() { true } else { false }</code>와 같습니다.
+  </p>
+
+  <h3><code>tokio::select!</code> — 둘 중 먼저 끝나는 쪽</h3>
+  <pre>let out: ToolOutput = tokio::select! {
+    _ = cancel.cancelled() =&gt; ToolOutput {
+        text: "interrupted".into(),
+        is_error: true,
+    },
+    out = tool.call(args.clone(), &amp;cx) =&gt; out,
+};</pre>
+  <p>
+    도구가 오래 걸려도 Ctrl-C가 먼저면 왼쪽 갈래가 이깁니다.
+    진 쪽 작업은 취소됩니다(협조적 취소).
+    <code>_ = ...</code>는 “이 갈래의 값은 안 쓴다”입니다.
+    오른쪽은 도구가 준 <code>out</code>을 그대로 식의 값이 되게 합니다.
+  </p>
+
+  <h3>글자가 화면에 먼저 가는 펌프</h3>
+  <p>
+    모델 HTTP가 끝나는 것을 기다리면 타자가 늦습니다.
+    <code>call_model</code>은 별도의 송신 채널을 하나 더 엽니다.
+  </p>
+  <pre>let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+let events_live = events.clone();       <span class="c">// 바깥 화면 채널의 송신 손잡이 복제</span>
+let pump = tokio::spawn(async move {
+    while let Some(ev) = live_rx.recv().await {
+        if let crate::types::ModelEvent::TextDelta(s) = ev {
+            let _ = events_live.send(Event::TextDelta(s));
+        }
+    }
+});
+let result = self.model.stream(assembled.request, cancel.clone(), live_tx).await;
+let _ = pump.await;</pre>
+  <p>
+    모델은 <code>live_tx</code>로 조각를 보냅니다.
+    펌프 작업이 <code>ModelEvent::TextDelta</code>만
+    CLI가 아는 <code>Event::TextDelta</code>로 바꿉니다.
+    두 enum이 다릅니다. 커널 안 모델 이벤트와, 화면용 이벤트입니다.
+  </p>
+  <p>
+    <code>events.clone()</code>은 채널 내용을 복사하지 않습니다.
+    송신자를 하나 더 만듭니다. 펌프가 가져가도
+    <code>run</code>은 원래 <code>events</code>로 <code>ToolStart</code> 등을 보냅니다.
+  </p>
+
+  <h3>짝이 빈 tool call 메우기</h3>
+  <pre>if let Some(chat) = session.chats.iter().rev().find(|c| c.id == chat_id) {
+    for item in &amp;chat.items {
+        if let ItemKind::ToolCall { call_id, .. } = &amp;item.kind {
+            let has = chat.items.iter().any(|other| {
+                matches!(&amp;other.kind, ItemKind::ToolResult { call_id: id, .. } if id == call_id)
+            });
+            if !has {
+                self.store
+                    .append(chat_id, Item::tool_result(call_id, "interrupted", true))
+                    .await?;
+            }
+        }
+    }
+}</pre>
+  <p>
+    <code>find(|c| c.id == chat_id)</code> — 조건에 맞는 첫 원소의 참조.
+    <code>any(|other| ...)</code> — 하나라도 참이면 <code>true</code>.
+  </p>
+  <p>
+    안쪽 <code>matches!</code>의
+    <code>call_id: id</code>는
+    “필드는 <code>call_id</code>인데, 꺼낸 이름은 <code>id</code>로 하겠다”입니다.
+    바깥 루프의 <code>call_id</code>와 이름이 겹치지 않게 합니다.
+    뒤에 <code>if id == call_id</code>는 매크로 안의 가드입니다.
+  </p>
+
+  <h2 id="next">13. 다음에 혼자 열어볼 곳</h2>
+  <p>
+    아래는 REPL 한 줄을 이해한 뒤 보기 좋습니다. 같은 문법이 반복됩니다.
+  </p>
+  <table>
+    <tr><th>파일</th><th>보면 좋은 것</th></tr>
+    <tr>
+      <td><code>keel-core/src/types.rs</code></td>
+      <td>
+        <code>ItemKind</code>, <code>Event</code>처럼
+        칸을 가진 enum.
+        <code>Item::text</code>의 <code>impl Into&lt;String&gt;</code> —
+        <code>&amp;str</code>과 <code>String</code>을 둘 다 받는 인자.
+      </td>
+    </tr>
+    <tr>
+      <td><code>keel-core/src/traits.rs</code></td>
+      <td>
+        역할만 있는 trait.
+        <code>AlwaysAllow</code> / <code>AlwaysDeny</code>처럼
+        빈 구조체 + 한 줄 구현.
+      </td>
+    </tr>
+    <tr>
+      <td><code>keel-cli/src/main.rs</code>의 <code>run_print</code></td>
+      <td>
+        REPL과 같은 채널이지만 <code>match</code> 대신
+        <code>if let Event::TextDelta</code>만 처리하는 짧은 버전.
+      </td>
+    </tr>
+    <tr>
+      <td><code>keel-cli/src/config.rs</code>의 <code>substitute_vars</code></td>
+      <td>
+        <code>&amp;str</code>을 잘라 가며
+        <code>${VAR}</code>를 바꾸는 루프.
+        슬라이스(<code>&amp;rest[start + 2..]</code>) 연습.
+      </td>
+    </tr>
+    <tr>
+      <td><code>keel-openai/src/model.rs</code></td>
+      <td>
+        HTTP SSE 줄을 읽어 <code>ModelEvent</code>를 보내는 쪽.
+        <code>async</code>와 문자열 파싱이 같이 있습니다.
+      </td>
+    </tr>
+  </table>
+  <div class="tip">
+    막히는 줄이 있으면 타입부터 봅니다.
+    변수 위에 커서를 두거나,
+    <code>let 이름: 여기</code>처럼 타입을 잠깐 적어 컴파일러에게 물어보면
+    “이게 <code>&amp;str</code>인지 <code>String</code>인지,
+    <code>Option</code>인지 <code>Result</code>인지”가 대부분 풀립니다.
+    흐름은 <a href="repl.html">REPL이 돌아가는 길</a>을 같이 보면 됩니다.
+  </div>
+
+  <footer>
+    기준 코드: <code>crates/keel-cli/src/main.rs</code>,
+    <code>slash.rs</code>, <code>last.rs</code>,
+    <code>crates/keel-core/src/agent.rs</code>,
+    <code>traits.rs</code>, <code>types.rs</code>.
+    흐름 안내는 <a href="repl.html">repl.html</a>.
+    구현이 바뀌면 이 안내도 같이 고칩니다.
+  </footer>
+</main>
+</body>
+</html>

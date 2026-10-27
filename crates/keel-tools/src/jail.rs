@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JailKind {
     Seatbelt,
@@ -18,8 +21,37 @@ pub struct OsJail {
 
 static DETECTED: OnceLock<Option<JailKind>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TEST_WRAP: Cell<Option<(&'static str, JailKind)>> = const { Cell::new(None) };
+}
+
+/// Test-only: force a jail and a wrap program that cannot start.
+/// Thread-local so parallel tests do not share the override.
+#[cfg(test)]
+pub struct JailTestOverride;
+
+#[cfg(test)]
+impl JailTestOverride {
+    pub fn missing_bin() -> Self {
+        TEST_WRAP.with(|c| c.set(Some(("/no/such/keel-jail", JailKind::Seatbelt))));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for JailTestOverride {
+    fn drop(&mut self) {
+        TEST_WRAP.with(|c| c.set(None));
+    }
+}
+
 impl OsJail {
     pub fn detect() -> Option<Self> {
+        #[cfg(test)]
+        if let Some((_, kind)) = TEST_WRAP.with(|c| c.get()) {
+            return Some(Self { kind });
+        }
         DETECTED
             .get_or_init(probe)
             .map(|kind| Self { kind })
@@ -37,10 +69,15 @@ impl OsJail {
     }
 
     pub fn wrap(&self, cwd: &Path, command: &str) -> (PathBuf, Vec<String>) {
-        match self.kind {
+        let (prog, args) = match self.kind {
             JailKind::Seatbelt => wrap_seatbelt(cwd, command),
             JailKind::Bwrap => wrap_bwrap(cwd, command),
+        };
+        #[cfg(test)]
+        if let Some((over, _)) = TEST_WRAP.with(|c| c.get()) {
+            return (PathBuf::from(over), args);
         }
+        (prog, args)
     }
 }
 

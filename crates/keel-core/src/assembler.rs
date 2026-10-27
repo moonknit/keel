@@ -1,5 +1,7 @@
 use crate::traits::ContextSource;
-use crate::types::{Assembled, ChatStatus, Item, ItemKind, ModelRequest, Role, ToolSpec, WorkingSession};
+use crate::types::{
+    Assembled, ChatStatus, Item, ItemKind, ModelRequest, Role, ToolSpec, WorkingSession,
+};
 
 pub struct ContextAssembler {
     pub context_limit: u32,
@@ -17,9 +19,9 @@ fn estimate_tokens(items: &[Item]) -> u32 {
     items
         .iter()
         .map(|item| match &item.kind {
-            ItemKind::Text { text } | ItemKind::Notice { text } | ItemKind::ToolResult { output: text, .. } => {
-                (text.len() as u32 / 4).max(1)
-            }
+            ItemKind::Text { text }
+            | ItemKind::Notice { text }
+            | ItemKind::ToolResult { output: text, .. } => (text.len() as u32 / 4).max(1),
             ItemKind::ToolCall { args, .. } => (args.to_string().len() as u32 / 4).max(1),
             _ => 8,
         })
@@ -27,7 +29,13 @@ fn estimate_tokens(items: &[Item]) -> u32 {
 }
 
 impl ContextSource for ContextAssembler {
-    fn assemble(&self, session: &WorkingSession, system: String, tools: Vec<ToolSpec>) -> Assembled {
+    fn assemble_drop(
+        &self,
+        session: &WorkingSession,
+        system: String,
+        tools: Vec<ToolSpec>,
+        extra_drop: usize,
+    ) -> Assembled {
         let budget = (self.context_limit as f32 * 0.8) as u32;
         let mut kept: Vec<&crate::types::Chat> = Vec::new();
         let mut dropped = 0usize;
@@ -46,6 +54,17 @@ impl ContextSource for ContextAssembler {
             kept.push(chat);
         }
         kept.reverse();
+        let mut extra = 0usize;
+        let mut i = 0usize;
+        while extra < extra_drop && i < kept.len() {
+            if kept[i].status == ChatStatus::Running {
+                i += 1;
+                continue;
+            }
+            kept.remove(i);
+            extra += 1;
+            dropped += 1;
+        }
         let mut items = Vec::new();
         if dropped > 0 {
             items.push(Item::notice(format!("이전 {dropped}개 chat 생략")));

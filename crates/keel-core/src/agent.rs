@@ -12,6 +12,10 @@ use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_MAX_TURNS: u32 = 50;
 
+fn is_overflow(err: &KeelError) -> bool {
+    err.to_string().contains("overflow")
+}
+
 pub struct Agent {
     pub model: Arc<dyn Model>,
     pub tools: Vec<Arc<dyn Tool>>,
@@ -65,7 +69,7 @@ impl Agent {
 
         for turn in 1..=self.max_turns {
             if cancel.is_cancelled() {
-                self.finish_interrupted(&session.chats.last().unwrap().id, &session, &events)
+                self.finish_interrupted(&chat.id, session_id, usage_sum)
                     .await?;
                 let _ = events.send(Event::RunEnd {
                     status: RunStatus::Interrupted,
@@ -74,26 +78,22 @@ impl Agent {
             }
             let _ = events.send(Event::TurnStart { turn });
             session = self.store.open_session(session_id).await?;
-            let assembled = self.assembler.assemble(&session, self.system.clone(), self.specs());
-            if assembled.dropped_chats > 0 {
-                let _ = events.send(Event::ContextTrimmed {
-                    dropped_chats: assembled.dropped_chats,
-                });
-            }
-            let (live_tx, mut live_rx) = mpsc::unbounded_channel();
-            let events_live = events.clone();
-            let pump = tokio::spawn(async move {
-                while let Some(ev) = live_rx.recv().await {
-                    if let crate::types::ModelEvent::TextDelta(s) = ev {
-                        let _ = events_live.send(Event::TextDelta(s));
-                    }
+            let model_events = match self
+                .call_model(&session, cancel.clone(), &events)
+                .await
+            {
+                Ok(ev) => ev,
+                Err(e) if is_overflow(&e) => {
+                    self.store
+                        .end_chat(&chat.id, ChatStatus::Error, usage_sum)
+                        .await?;
+                    let _ = events.send(Event::RunEnd {
+                        status: RunStatus::Error,
+                    });
+                    return Err(e);
                 }
-            });
-            let model_events = self
-                .model
-                .stream(assembled.request, cancel.clone(), live_tx)
-                .await?;
-            let _ = pump.await;
+                Err(e) => return Err(e),
+            };
             let mut new_items = Vec::new();
             let mut usage = Usage::default();
             for ev in model_events {
@@ -117,6 +117,15 @@ impl Agent {
             usage_sum.input_tokens += usage.input_tokens;
             usage_sum.output_tokens += usage.output_tokens;
             let _ = events.send(Event::Usage(usage));
+
+            if cancel.is_cancelled() {
+                self.finish_interrupted(&chat.id, session_id, usage_sum)
+                    .await?;
+                let _ = events.send(Event::RunEnd {
+                    status: RunStatus::Interrupted,
+                });
+                return Ok(RunStatus::Interrupted);
+            }
 
             let calls: Vec<(String, String, Value)> = new_items
                 .iter()
@@ -174,17 +183,21 @@ impl Agent {
                     continue;
                 }
                 let started = Instant::now();
-                let out: ToolOutput = tool.call(args.clone(), &cx).await;
+                let out: ToolOutput = tokio::select! {
+                    _ = cancel.cancelled() => ToolOutput {
+                        text: "interrupted".into(),
+                        is_error: true,
+                    },
+                    out = tool.call(args.clone(), &cx) => out,
+                };
                 let millis = started.elapsed().as_millis();
                 let lines = out.text.lines().count();
                 let result = Item::tool_result(&call_id, &out.text, out.is_error);
                 self.store.append(&chat.id, result).await?;
                 if name == "skill" && !out.is_error {
-                    if let Some(root) = out.text.lines().find_map(|l| l.strip_prefix("skill_root=")) {
-                        let sk_name = args
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("skill");
+                    if let Some(root) = out.text.lines().find_map(|l| l.strip_prefix("skill_root="))
+                    {
+                        let sk_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("skill");
                         let skill = crate::types::Item {
                             id: ulid::Ulid::new().to_string(),
                             role: crate::types::Role::Assistant,
@@ -205,8 +218,7 @@ impl Agent {
                 });
             }
             if cancel.is_cancelled() {
-                self.store
-                    .end_chat(&chat.id, ChatStatus::Interrupted, usage_sum)
+                self.finish_interrupted(&chat.id, session_id, usage_sum)
                     .await?;
                 let _ = events.send(Event::RunEnd {
                     status: RunStatus::Interrupted,
@@ -223,12 +235,54 @@ impl Agent {
         Ok(RunStatus::Limit)
     }
 
+    async fn call_model(
+        &self,
+        session: &crate::types::WorkingSession,
+        cancel: CancellationToken,
+        events: &mpsc::UnboundedSender<Event>,
+    ) -> Result<Vec<crate::types::ModelEvent>> {
+        let mut extra_drop = 0usize;
+        loop {
+            let assembled = self.assembler.assemble_drop(
+                session,
+                self.system.clone(),
+                self.specs(),
+                extra_drop,
+            );
+            if assembled.dropped_chats > 0 {
+                let _ = events.send(Event::ContextTrimmed {
+                    dropped_chats: assembled.dropped_chats,
+                });
+            }
+            let (live_tx, mut live_rx) = mpsc::unbounded_channel();
+            let events_live = events.clone();
+            let pump = tokio::spawn(async move {
+                while let Some(ev) = live_rx.recv().await {
+                    if let crate::types::ModelEvent::TextDelta(s) = ev {
+                        let _ = events_live.send(Event::TextDelta(s));
+                    }
+                }
+            });
+            let result = self
+                .model
+                .stream(assembled.request, cancel.clone(), live_tx)
+                .await;
+            let _ = pump.await;
+            match result {
+                Ok(ev) => return Ok(ev),
+                Err(e) if extra_drop == 0 && is_overflow(&e) => extra_drop = 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     async fn finish_interrupted(
         &self,
         chat_id: &str,
-        session: &crate::types::WorkingSession,
-        _events: &mpsc::UnboundedSender<Event>,
+        session_id: &str,
+        usage: Usage,
     ) -> Result<()> {
+        let session = self.store.open_session(session_id).await?;
         if let Some(chat) = session.chats.iter().rev().find(|c| c.id == chat_id) {
             for item in &chat.items {
                 if let ItemKind::ToolCall { call_id, .. } = &item.kind {
@@ -244,7 +298,7 @@ impl Agent {
             }
         }
         self.store
-            .end_chat(chat_id, ChatStatus::Interrupted, Usage::default())
+            .end_chat(chat_id, ChatStatus::Interrupted, usage)
             .await
             .map_err(|e| KeelError::Msg(e.to_string()))
     }

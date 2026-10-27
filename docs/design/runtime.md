@@ -226,7 +226,9 @@ keel session rm <id>     archived = 1
 - 아래: 입력. `/` 명령
 - 권한 확인은 입력 줄에서 y/n
 
-슬래시 명령: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit`. `/compact`는 예약.
+슬래시 명령: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit`. `/new`와 `/resume`은 REPL 루프 안에서 session을 바꾼다. `/last`는 직전 도구 출력 전문. `/compact`는 예약.
+
+MCP는 `keel-cli` 기동 시 `config.toml`의 서버를 붙여 `Agent.tools`에 넣는다. crate만 두고 연결하지 않으면 안 된다.
 
 키. 실행 중 Ctrl-C는 현재 chat을 취소한다(`interrupted`). 프롬프트에서 Ctrl-C 두 번이나 Ctrl-D는 종료다. 실행 중 끼어들기 입력은 v1에 없다.
 

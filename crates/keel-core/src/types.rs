@@ -15,8 +15,12 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemKind {
-    Text { text: String },
-    Reasoning { summary: Option<String> },
+    Text {
+        text: String,
+    },
+    Reasoning {
+        summary: Option<String>,
+    },
     ToolCall {
         call_id: String,
         name: String,
@@ -27,9 +31,17 @@ pub enum ItemKind {
         output: String,
         is_error: bool,
     },
-    HostedTool { name: String, detail: Value },
-    Skill { name: String, root: PathBuf },
-    Notice { text: String },
+    HostedTool {
+        name: String,
+        detail: Value,
+    },
+    Skill {
+        name: String,
+        root: PathBuf,
+    },
+    Notice {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,7 +71,11 @@ impl Item {
         }
     }
 
-    pub fn tool_result(call_id: impl Into<String>, output: impl Into<String>, is_error: bool) -> Self {
+    pub fn tool_result(
+        call_id: impl Into<String>,
+        output: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
         Self {
             id: ulid::Ulid::new().to_string(),
             role: Role::Tool,

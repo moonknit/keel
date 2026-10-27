@@ -40,7 +40,8 @@ fn recover_chat(chat: &mut Chat) {
         }
     }
     for call_id in pending {
-        chat.items.push(Item::tool_result(call_id, "interrupted", true));
+        chat.items
+            .push(Item::tool_result(call_id, "interrupted", true));
     }
 }
 
@@ -72,7 +73,10 @@ impl Store for MemoryStore {
     }
 
     async fn open_session(&self, id: &str) -> Result<WorkingSession> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let ws = inner
             .sessions
             .get_mut(id)
@@ -102,8 +106,15 @@ impl Store for MemoryStore {
         Ok(ws.clone())
     }
 
-    async fn list_sessions(&self, cwd: Option<&str>, include_archived: bool) -> Result<Vec<SessionMeta>> {
-        let inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+    async fn list_sessions(
+        &self,
+        cwd: Option<&str>,
+        include_archived: bool,
+    ) -> Result<Vec<SessionMeta>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let mut out: Vec<_> = inner
             .sessions
             .values()
@@ -116,7 +127,10 @@ impl Store for MemoryStore {
     }
 
     async fn begin_chat(&self, session_id: &str, title: Option<&str>) -> Result<Chat> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let ws = inner
             .sessions
             .get_mut(session_id)
@@ -140,7 +154,10 @@ impl Store for MemoryStore {
     }
 
     async fn append(&self, chat_id: &str, item: Item) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         for ws in inner.sessions.values_mut() {
             if let Some(chat) = ws.chats.iter_mut().find(|c| c.id == chat_id) {
                 chat.items.push(item);
@@ -152,7 +169,10 @@ impl Store for MemoryStore {
     }
 
     async fn end_chat(&self, chat_id: &str, status: ChatStatus, usage: Usage) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         for ws in inner.sessions.values_mut() {
             if let Some(chat) = ws.chats.iter_mut().find(|c| c.id == chat_id) {
                 chat.status = status;
@@ -166,7 +186,10 @@ impl Store for MemoryStore {
     }
 
     async fn rename(&self, session_id: &str, title: &str) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let ws = inner
             .sessions
             .get_mut(session_id)
@@ -176,7 +199,10 @@ impl Store for MemoryStore {
     }
 
     async fn close(&self, session_id: &str) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         if let Some(ws) = inner.sessions.get_mut(session_id) {
             ws.meta.lock_pid = None;
         }
@@ -184,7 +210,10 @@ impl Store for MemoryStore {
     }
 
     async fn archive(&self, session_id: &str) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let ws = inner
             .sessions
             .get_mut(session_id)
