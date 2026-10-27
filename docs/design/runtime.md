@@ -1,7 +1,7 @@
 # keel 런타임 설계
 
 조사: [lightweight-agent-runtimes.md](../research/lightweight-agent-runtimes.md).
-제품 한 줄: README. 턴 루프가 커널이고, 훅·크론·서브에이전트는 그 루프에 넣는 메시지다. 채널과 도구, 대시보드는 커널 밖에 둔다.
+제품 한 줄: README. 턴 루프 하나가 커널이다. 비동기 자식 완료는 Inbox로 들어온다. 훅은 루프 콜백이다. 도구와 서브에이전트 런처는 호스트다. 크론·채널·대시보드는 아직 없다.
 
 이 문서는 그 커널에 ReAct, 코드 생성·실행, MCP, `SKILL.md`, 세션 저장, CLI를 어떻게 붙일지 정한다.
 

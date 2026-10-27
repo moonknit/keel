@@ -2,7 +2,7 @@
 
 가벼운 Rust 에이전트 런타임.
 
-턴 루프 하나가 커널이다. 훅, 크론, 서브에이전트는 그 루프에 넣는 메시지다. 채널과 도구, 대시보드는 커널 밖에 둔다.
+턴 루프 하나가 커널이다. 비동기 자식 완료는 그 루프 Inbox로 들어온다. 훅은 루프 콜백이고, 크론·채널·대시보드는 아직 없다. 도구와 서브에이전트 런처는 커널 밖 호스트다.
 
 조사와 설계는 [docs/index.md](docs/index.md)에 있다.
 REPL이 코드를 어떻게 도는지는 [docs/guide/repl.html](docs/guide/repl.html)에 있다. Rust를 다시 익히며 같은 코드를 읽고 싶다면 [docs/guide/repl-rust.html](docs/guide/repl-rust.html)을 본다.
