@@ -6,7 +6,7 @@ use keel_core::types::{
     Chat, ChatStatus, Item, ItemKind, Role, SessionMeta, Usage, WorkingSession,
 };
 use keel_core::{KeelError, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -196,9 +196,7 @@ fn kind_name(k: &ItemKind) -> &'static str {
 
 fn load_items(conn: &Connection, chat_id: &str) -> Result<Vec<Item>> {
     let mut stmt = conn
-        .prepare(
-            "SELECT id, role, kind, body, raw FROM message WHERE chat_id=?1 ORDER BY seq",
-        )
+        .prepare("SELECT id, role, kind, body, raw FROM message WHERE chat_id=?1 ORDER BY seq")
         .map_err(|e| KeelError::Msg(e.to_string()))?;
     let rows = stmt
         .query_map([chat_id], |row| {
@@ -263,7 +261,11 @@ fn recover(conn: &Connection, session_id: &str) -> Result<()> {
             }
         }
         for call_id in pending {
-            insert_item(conn, &chat_id, &Item::tool_result(call_id, "interrupted", true))?;
+            insert_item(
+                conn,
+                &chat_id,
+                &Item::tool_result(call_id, "interrupted", true),
+            )?;
         }
     }
     Ok(())
@@ -277,10 +279,7 @@ fn insert_item(conn: &Connection, chat_id: &str, item: &Item) -> Result<()> {
             |row| row.get(0),
         )
         .map_err(|e| KeelError::Msg(e.to_string()))?;
-    let raw = item
-        .raw
-        .as_ref()
-        .map(|v| v.to_string());
+    let raw = item.raw.as_ref().map(|v| v.to_string());
     conn.execute(
         "INSERT INTO message (id, chat_id, seq, role, kind, body, raw, provider, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -333,7 +332,10 @@ impl Store for SqliteStore {
         let now = now_ms();
         let pid = std::process::id() as i64;
         {
-            let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| KeelError::Msg("lock".into()))?;
             conn.execute(
                 "INSERT INTO session (id,title,cwd,model,lock_pid,created_at,updated_at,archived)
                  VALUES (?1,NULL,?2,?3,?4,?5,?5,0)",
@@ -346,9 +348,14 @@ impl Store for SqliteStore {
 
     async fn open_session(&self, id: &str) -> Result<WorkingSession> {
         let me = std::process::id() as i64;
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let lock: Option<i64> = conn
-            .query_row("SELECT lock_pid FROM session WHERE id=?1", [id], |row| row.get(0))
+            .query_row("SELECT lock_pid FROM session WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
             .map_err(|e| KeelError::Msg(e.to_string()))?;
         match lock {
             Some(pid) if pid == me => {}
@@ -367,8 +374,15 @@ impl Store for SqliteStore {
         Self::load_session_locked(&conn, id)
     }
 
-    async fn list_sessions(&self, cwd: Option<&str>, include_archived: bool) -> Result<Vec<SessionMeta>> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+    async fn list_sessions(
+        &self,
+        cwd: Option<&str>,
+        include_archived: bool,
+    ) -> Result<Vec<SessionMeta>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let sql = if include_archived {
             "SELECT id, title, cwd, model, lock_pid, created_at, updated_at, archived FROM session
              WHERE (?1 IS NULL OR cwd=?1) ORDER BY updated_at DESC"
@@ -376,7 +390,9 @@ impl Store for SqliteStore {
             "SELECT id, title, cwd, model, lock_pid, created_at, updated_at, archived FROM session
              WHERE archived=0 AND (?1 IS NULL OR cwd=?1) ORDER BY updated_at DESC"
         };
-        let mut stmt = conn.prepare(sql).map_err(|e| KeelError::Msg(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
         let rows = stmt
             .query_map([cwd], |row| {
                 Ok(SessionMeta {
@@ -396,7 +412,10 @@ impl Store for SqliteStore {
     }
 
     async fn begin_chat(&self, session_id: &str, title: Option<&str>) -> Result<Chat> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         let seq: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(seq),0)+1 FROM chat WHERE session_id=?1",
@@ -431,12 +450,18 @@ impl Store for SqliteStore {
     }
 
     async fn append(&self, chat_id: &str, item: Item) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         insert_item(&conn, chat_id, &item)
     }
 
     async fn end_chat(&self, chat_id: &str, status: ChatStatus, usage: Usage) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         conn.execute(
             "UPDATE chat SET status=?1, input_tokens=?2, output_tokens=?3, ended_at=?4 WHERE id=?5",
             params![
@@ -452,7 +477,10 @@ impl Store for SqliteStore {
     }
 
     async fn rename(&self, session_id: &str, title: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
         conn.execute(
             "UPDATE session SET title=?1 WHERE id=?2",
             params![title, session_id],
@@ -462,22 +490,22 @@ impl Store for SqliteStore {
     }
 
     async fn close(&self, session_id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
-        conn.execute(
-            "UPDATE session SET lock_pid=NULL WHERE id=?1",
-            [session_id],
-        )
-        .map_err(|e| KeelError::Msg(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        conn.execute("UPDATE session SET lock_pid=NULL WHERE id=?1", [session_id])
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
         Ok(())
     }
 
     async fn archive(&self, session_id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| KeelError::Msg("lock".into()))?;
-        conn.execute(
-            "UPDATE session SET archived=1 WHERE id=?1",
-            [session_id],
-        )
-        .map_err(|e| KeelError::Msg(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        conn.execute("UPDATE session SET archived=1 WHERE id=?1", [session_id])
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
         Ok(())
     }
 }

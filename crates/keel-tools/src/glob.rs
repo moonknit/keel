@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use globset::{Glob as G, GlobSetBuilder};
 use keel_core::traits::Tool;
 use keel_core::types::{ToolClass, ToolCx, ToolOutput, ToolSpec};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub struct Glob;
 
@@ -26,7 +26,12 @@ impl Tool for Glob {
         let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
         let glob = match G::new(pattern) {
             Ok(g) => g,
-            Err(e) => return ToolOutput { text: e.to_string(), is_error: true },
+            Err(e) => {
+                return ToolOutput {
+                    text: e.to_string(),
+                    is_error: true,
+                };
+            }
         };
         let set = GlobSetBuilder::new().add(glob).build().unwrap();
         let mut hits = Vec::new();

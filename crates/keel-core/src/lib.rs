@@ -9,7 +9,7 @@ pub mod scripted;
 pub mod traits;
 pub mod types;
 
-pub use agent::{Agent, DEFAULT_MAX_TURNS};
+pub use agent::{Agent, CwdWriteLock, DEFAULT_MAX_TURNS, Inbox};
 pub use assembler::ContextAssembler;
 pub use config::LlmSettings;
 pub use error::{KeelError, Result};
@@ -50,7 +50,9 @@ mod inv_tests {
 #[cfg(test)]
 mod loop_tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     fn item_call(name: &str, id: &str) -> Item {
@@ -86,6 +88,8 @@ mod loop_tests {
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let status = agent
@@ -120,7 +124,7 @@ mod loop_tests {
         assert_eq!(ws.chats[0].status, ChatStatus::Done);
     }
 
-    /// REQ-3.2 tools run one after another then the model is called again.
+    /// REQ-3.2 tools in a turn then the model is called again.
     #[tokio::test]
     async fn req_3_2_serial_tools_then_text() {
         let model = ScriptedModel::new(vec![
@@ -151,6 +155,256 @@ mod loop_tests {
             .map(|i| std::mem::discriminant(&i.kind))
             .collect();
         assert!(kinds.len() >= 4);
+    }
+
+    #[derive(Clone)]
+    struct Probe {
+        inflight: Arc<AtomicUsize>,
+        max: Arc<AtomicUsize>,
+        starts: Arc<Mutex<Vec<Instant>>>,
+        ends: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl Probe {
+        fn new() -> Self {
+            Self {
+                inflight: Arc::new(AtomicUsize::new(0)),
+                max: Arc::new(AtomicUsize::new(0)),
+                starts: Arc::new(Mutex::new(Vec::new())),
+                ends: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        fn enter(&self) {
+            self.starts.lock().expect("starts").push(Instant::now());
+            let n = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max.fetch_max(n, Ordering::SeqCst);
+        }
+        fn leave(&self) {
+            self.ends.lock().expect("ends").push(Instant::now());
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ProbeTool {
+        name: String,
+        class: ToolClass,
+        delay: Duration,
+        probe: Probe,
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for ProbeTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.clone(),
+                description: self.name.clone(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn class(&self) -> ToolClass {
+            self.class
+        }
+        async fn call(&self, _args: serde_json::Value, _cx: &ToolCx) -> ToolOutput {
+            self.probe.enter();
+            tokio::time::sleep(self.delay).await;
+            self.probe.leave();
+            ToolOutput {
+                text: self.text.clone(),
+                is_error: false,
+            }
+        }
+    }
+
+    /// REQ-3.2 two Read tools in one turn overlap.
+    #[tokio::test]
+    async fn req_3_2_reads_run_in_parallel() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        struct BarrierRead {
+            name: String,
+            barrier: Arc<tokio::sync::Barrier>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for BarrierRead {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: self.name.clone(),
+                    description: self.name.clone(),
+                    parameters: serde_json::json!({"type":"object","properties":{}}),
+                }
+            }
+            fn class(&self) -> ToolClass {
+                ToolClass::Read
+            }
+            async fn call(&self, _args: serde_json::Value, _cx: &ToolCx) -> ToolOutput {
+                self.barrier.wait().await;
+                ToolOutput {
+                    text: self.name.clone(),
+                    is_error: false,
+                }
+            }
+        }
+        let model = ScriptedModel::new(vec![
+            vec![
+                ModelEvent::ItemDone(item_call("r1", "c1")),
+                ModelEvent::ItemDone(item_call("r2", "c2")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ModelEvent::ItemDone(item_text("done")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+        ]);
+        let ran = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_with(
+                model,
+                vec![
+                    Arc::new(BarrierRead {
+                        name: "r1".into(),
+                        barrier: barrier.clone(),
+                    }),
+                    Arc::new(BarrierRead {
+                        name: "r2".into(),
+                        barrier,
+                    }),
+                ],
+                Arc::new(AlwaysAllow),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("REQ-3.2 reads must meet at the barrier together");
+        let (status, ws) = ran;
+        assert_eq!(status, RunStatus::Done);
+        for id in ["c1", "c2"] {
+            assert!(ws.chats[0].items.iter().any(|i| {
+                matches!(&i.kind, ItemKind::ToolResult { call_id, is_error, .. } if call_id == id && !is_error)
+            }));
+        }
+    }
+
+    /// REQ-3.2 Write and Exec in one turn do not overlap.
+    #[tokio::test]
+    async fn req_3_2_writes_and_exec_stay_serial() {
+        let probe = Probe::new();
+        let delay = Duration::from_millis(40);
+        let model = ScriptedModel::new(vec![
+            vec![
+                ModelEvent::ItemDone(item_call("w1", "c1")),
+                ModelEvent::ItemDone(item_call("bash", "c2")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ModelEvent::ItemDone(item_text("done")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+        ]);
+        let (status, _) = run_with(
+            model,
+            vec![
+                Arc::new(ProbeTool {
+                    name: "w1".into(),
+                    class: ToolClass::Write,
+                    delay,
+                    probe: probe.clone(),
+                    text: "w".into(),
+                }),
+                Arc::new(ProbeTool {
+                    name: "bash".into(),
+                    class: ToolClass::Exec,
+                    delay,
+                    probe: probe.clone(),
+                    text: "b".into(),
+                }),
+            ],
+            Arc::new(AlwaysAllow),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(status, RunStatus::Done);
+        assert_eq!(probe.max.load(Ordering::SeqCst), 1);
+    }
+
+    /// REQ-3.2 mixed Read and Write: the read batch finishes before Write starts.
+    #[tokio::test]
+    async fn req_3_2_reads_finish_before_writes() {
+        let reads = Probe::new();
+        let writes = Probe::new();
+        let model = ScriptedModel::new(vec![
+            vec![
+                ModelEvent::ItemDone(item_call("w1", "cw")),
+                ModelEvent::ItemDone(item_call("r1", "cr1")),
+                ModelEvent::ItemDone(item_call("r2", "cr2")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ModelEvent::ItemDone(item_text("done")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+        ]);
+        let (status, _) = run_with(
+            model,
+            vec![
+                Arc::new(ProbeTool {
+                    name: "w1".into(),
+                    class: ToolClass::Write,
+                    delay: Duration::from_millis(10),
+                    probe: writes.clone(),
+                    text: "w".into(),
+                }),
+                Arc::new(ProbeTool {
+                    name: "r1".into(),
+                    class: ToolClass::Read,
+                    delay: Duration::from_millis(40),
+                    probe: reads.clone(),
+                    text: "r1".into(),
+                }),
+                Arc::new(ProbeTool {
+                    name: "r2".into(),
+                    class: ToolClass::Read,
+                    delay: Duration::from_millis(40),
+                    probe: reads.clone(),
+                    text: "r2".into(),
+                }),
+            ],
+            Arc::new(AlwaysAllow),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(status, RunStatus::Done);
+        let last_read = reads
+            .ends
+            .lock()
+            .expect("ends")
+            .iter()
+            .copied()
+            .max()
+            .expect("reads finished");
+        let first_write = writes
+            .starts
+            .lock()
+            .expect("starts")
+            .first()
+            .copied()
+            .expect("write started");
+        assert!(
+            first_write >= last_read,
+            "REQ-3.2 write must start after the read batch"
+        );
+        assert!(reads.max.load(Ordering::SeqCst) >= 2);
     }
 
     fn assert_inv4_paired(ws: &WorkingSession, call_id: &str) {
@@ -257,6 +511,8 @@ mod loop_tests {
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel_run = cancel.clone();
@@ -280,31 +536,40 @@ mod loop_tests {
         assert_inv4_paired(&ws, "c-stream");
     }
 
+    struct SlowTool {
+        name: String,
+    }
+
+    impl SlowTool {
+        fn new(name: &str) -> Self {
+            Self { name: name.into() }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SlowTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.clone(),
+                description: self.name.clone(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn class(&self) -> ToolClass {
+            ToolClass::Read
+        }
+        async fn call(&self, _args: serde_json::Value, _cx: &ToolCx) -> ToolOutput {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            ToolOutput {
+                text: "late".into(),
+                is_error: false,
+            }
+        }
+    }
+
     /// REQ-3.3 INV-4 cancel while a tool is running still pairs the call.
     #[tokio::test]
     async fn req_3_3_inv4_cancel_mid_tool_pairs_tool_call() {
-        struct SlowTool;
-        #[async_trait::async_trait]
-        impl Tool for SlowTool {
-            fn spec(&self) -> ToolSpec {
-                ToolSpec {
-                    name: "slow".into(),
-                    description: "slow".into(),
-                    parameters: serde_json::json!({"type":"object","properties":{}}),
-                }
-            }
-            fn class(&self) -> ToolClass {
-                ToolClass::Read
-            }
-            async fn call(&self, _args: serde_json::Value, _cx: &ToolCx) -> ToolOutput {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                ToolOutput {
-                    text: "late".into(),
-                    is_error: false,
-                }
-            }
-        }
-
         let model = ScriptedModel::new(vec![vec![
             ModelEvent::ItemDone(item_call("slow", "c-tool")),
             ModelEvent::Completed {
@@ -316,12 +581,14 @@ mod loop_tests {
         let cancel = CancellationToken::new();
         let agent = Agent {
             model: Arc::new(model),
-            tools: vec![Arc::new(SlowTool)],
+            tools: vec![Arc::new(SlowTool::new("slow"))],
             store: store.clone(),
             approver: Arc::new(AlwaysAllow),
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel_run = cancel.clone();
@@ -352,6 +619,62 @@ mod loop_tests {
         let ws = store.open_session(&session.meta.id).await.unwrap();
         assert_eq!(ws.chats[0].status, ChatStatus::Interrupted);
         assert_inv4_paired(&ws, "c-tool");
+    }
+
+    /// REQ-3.3 INV-4 cancel during parallel reads pairs every call_id.
+    #[tokio::test]
+    async fn req_3_3_inv4_cancel_parallel_reads_pairs_all() {
+        let model = ScriptedModel::new(vec![vec![
+            ModelEvent::ItemDone(item_call("slow-a", "c-a")),
+            ModelEvent::ItemDone(item_call("slow-b", "c-b")),
+            ModelEvent::Completed {
+                usage: Default::default(),
+            },
+        ]]);
+        let store = Arc::new(MemoryStore::default());
+        let session = store.create_session("/tmp", "test-model").await.unwrap();
+        let cancel = CancellationToken::new();
+        let agent = Agent {
+            model: Arc::new(model),
+            tools: vec![
+                Arc::new(SlowTool::new("slow-a")),
+                Arc::new(SlowTool::new("slow-b")),
+            ],
+            store: store.clone(),
+            approver: Arc::new(AlwaysAllow),
+            assembler: Arc::new(ContextAssembler::default()),
+            max_turns: 3,
+            system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_run = cancel.clone();
+        let sid = session.meta.id.clone();
+        let run =
+            tokio::spawn(
+                async move { agent.run(&sid, "hello", "/tmp", cancel, tx).await.unwrap() },
+            );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut starts = 0usize;
+        while Instant::now() < deadline && starts < 2 {
+            match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+                Ok(Some(Event::ToolStart { .. })) => starts += 1,
+                Ok(None) => break,
+                Ok(Some(_)) | Err(_) => {}
+            }
+        }
+        assert_eq!(starts, 2, "both reads must start before cancel");
+        cancel_run.cancel();
+        let status = tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("parallel-read cancel must finish the run")
+            .unwrap();
+        assert_eq!(status, RunStatus::Interrupted);
+        let ws = store.open_session(&session.meta.id).await.unwrap();
+        assert_eq!(ws.chats[0].status, ChatStatus::Interrupted);
+        assert_inv4_paired(&ws, "c-a");
+        assert_inv4_paired(&ws, "c-b");
     }
 
     /// REQ-3.22 TextDelta is forwarded before stream() returns.
@@ -394,6 +717,8 @@ mod loop_tests {
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let run = tokio::spawn(async move {
@@ -458,10 +783,7 @@ mod loop_tests {
 
     async fn seed_done_chats(store: &MemoryStore, session_id: &str, n: usize) {
         for i in 0..n {
-            let chat = store
-                .begin_chat(session_id, Some("old"))
-                .await
-                .unwrap();
+            let chat = store.begin_chat(session_id, Some("old")).await.unwrap();
             store
                 .append(&chat.id, Item::text(Role::User, format!("old-{i}")))
                 .await
@@ -491,9 +813,10 @@ mod loop_tests {
                 live: tokio::sync::mpsc::UnboundedSender<ModelEvent>,
             ) -> Result<Vec<ModelEvent>> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
-                let has_oldest = req.items.iter().any(|i| {
-                    matches!(&i.kind, ItemKind::Text { text } if text == "old-0")
-                });
+                let has_oldest = req
+                    .items
+                    .iter()
+                    .any(|i| matches!(&i.kind, ItemKind::Text { text } if text == "old-0"));
                 self.saw_oldest.lock().unwrap().push(has_oldest);
                 if n == 0 {
                     return Err(KeelError::Msg("overflow".into()));
@@ -526,6 +849,8 @@ mod loop_tests {
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let status = agent
@@ -541,7 +866,11 @@ mod loop_tests {
         assert_eq!(status, RunStatus::Done);
         assert_eq!(model.calls.load(Ordering::SeqCst), 2);
         let saw = model.saw_oldest.lock().unwrap().clone();
-        assert_eq!(saw, vec![true, false], "retry must drop the oldest finished chat");
+        assert_eq!(
+            saw,
+            vec![true, false],
+            "retry must drop the oldest finished chat"
+        );
         let ws = store.open_session(&session.meta.id).await.unwrap();
         assert_eq!(ws.chats.last().unwrap().status, ChatStatus::Done);
     }
@@ -581,6 +910,8 @@ mod loop_tests {
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let err = agent
@@ -631,6 +962,8 @@ mod loop_tests {
             assembler: Arc::new(ContextAssembler::default()),
             max_turns: 3,
             system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox: Inbox::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         agent
@@ -658,6 +991,236 @@ mod loop_tests {
             .unwrap();
         let ws = store.open_session(&session.meta.id).await.unwrap();
         assert_eq!(ws.meta.title.as_deref(), Some("first line"));
+    }
+
+    fn scripted_one_call(name: &str, id: &str) -> ScriptedModel {
+        ScriptedModel::new(vec![
+            vec![
+                ModelEvent::ItemDone(item_call(name, id)),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+            vec![
+                ModelEvent::ItemDone(item_text("done")),
+                ModelEvent::Completed {
+                    usage: Default::default(),
+                },
+            ],
+        ])
+    }
+
+    async fn run_locked(
+        model: ScriptedModel,
+        tools: Vec<Arc<dyn Tool>>,
+        write_lock: CwdWriteLock,
+        cancel: CancellationToken,
+    ) -> RunStatus {
+        let store = Arc::new(MemoryStore::default());
+        let session = store.create_session("/tmp", "test-model").await.unwrap();
+        let agent = Agent {
+            model: Arc::new(model),
+            tools,
+            store: store.clone(),
+            approver: Arc::new(AlwaysAllow),
+            assembler: Arc::new(ContextAssembler::default()),
+            max_turns: 3,
+            system: "test".into(),
+            write_lock,
+            inbox: Inbox::default(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        agent
+            .run(&session.meta.id, "hello", "/tmp", cancel, tx)
+            .await
+            .unwrap()
+    }
+
+    struct HoldTool {
+        name: String,
+        class: ToolClass,
+        started: tokio::sync::watch::Sender<bool>,
+        release: tokio::sync::watch::Receiver<bool>,
+        probe: Probe,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for HoldTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.clone(),
+                description: self.name.clone(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+        fn class(&self) -> ToolClass {
+            self.class
+        }
+        async fn call(&self, _args: serde_json::Value, _cx: &ToolCx) -> ToolOutput {
+            self.probe.enter();
+            let _ = self.started.send(true);
+            let mut release = self.release.clone();
+            release.wait_for(|ready| *ready).await.expect("release");
+            self.probe.leave();
+            ToolOutput {
+                text: self.name.clone(),
+                is_error: false,
+            }
+        }
+    }
+
+    /// REQ-3.28 INV-14 shared cwd lock serializes write/edit/bash across agents.
+    #[tokio::test]
+    async fn req_3_28_inv14_shared_lock_serializes_write_across_agents() {
+        let lock = CwdWriteLock::new();
+        let probe = Probe::new();
+        let (started_tx, mut started_rx) = tokio::sync::watch::channel(false);
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let parent = tokio::spawn(run_locked(
+            scripted_one_call("write", "p1"),
+            vec![Arc::new(HoldTool {
+                name: "write".into(),
+                class: ToolClass::Write,
+                started: started_tx,
+                release: release_rx,
+                probe: probe.clone(),
+            })],
+            lock.clone(),
+            CancellationToken::new(),
+        ));
+        started_rx
+            .wait_for(|ready| *ready)
+            .await
+            .expect("parent write must start");
+        let child = tokio::spawn(run_locked(
+            scripted_one_call("bash", "c1"),
+            vec![Arc::new(ProbeTool {
+                name: "bash".into(),
+                class: ToolClass::Exec,
+                delay: Duration::from_millis(10),
+                probe: probe.clone(),
+                text: "b".into(),
+            })],
+            lock,
+            CancellationToken::new(),
+        ));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            probe.inflight.load(Ordering::SeqCst),
+            1,
+            "REQ-3.28 child bash must wait while parent write holds the cwd lock"
+        );
+        let _ = release_tx.send(true);
+        let parent_status = tokio::time::timeout(Duration::from_secs(2), parent)
+            .await
+            .expect("parent write must finish")
+            .unwrap();
+        let child_status = tokio::time::timeout(Duration::from_secs(2), child)
+            .await
+            .expect("child bash must finish after the lock is released")
+            .unwrap();
+        assert_eq!(parent_status, RunStatus::Done);
+        assert_eq!(child_status, RunStatus::Done);
+        assert_eq!(probe.max.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.inflight.load(Ordering::SeqCst), 0);
+    }
+
+    /// REQ-3.28 INV-14 Read does not take the cwd write lock.
+    #[tokio::test]
+    async fn req_3_28_inv14_reads_do_not_take_cwd_lock() {
+        let lock = CwdWriteLock::new();
+        let (started_tx, mut started_rx) = tokio::sync::watch::channel(false);
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let writer = tokio::spawn(run_locked(
+            scripted_one_call("write", "w1"),
+            vec![Arc::new(HoldTool {
+                name: "write".into(),
+                class: ToolClass::Write,
+                started: started_tx,
+                release: release_rx,
+                probe: Probe::new(),
+            })],
+            lock.clone(),
+            CancellationToken::new(),
+        ));
+        started_rx
+            .wait_for(|ready| *ready)
+            .await
+            .expect("write must start");
+        let read_status = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_locked(
+                scripted_one_call("read", "r1"),
+                vec![Arc::new(FakeTool::new("read", "ok"))],
+                lock,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("REQ-3.28 Read must finish while write holds the cwd lock");
+        assert_eq!(read_status, RunStatus::Done);
+        let _ = release_tx.send(true);
+        let write_status = tokio::time::timeout(Duration::from_secs(2), writer)
+            .await
+            .expect("held write must finish after release")
+            .unwrap();
+        assert_eq!(write_status, RunStatus::Done);
+    }
+
+    /// REQ-3.28 INV-14 agents must share one lock object; separate locks do not serialize.
+    #[tokio::test]
+    async fn req_3_28_inv14_separate_locks_do_not_serialize() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        struct BarrierWrite {
+            name: String,
+            barrier: Arc<tokio::sync::Barrier>,
+        }
+        #[async_trait::async_trait]
+        impl Tool for BarrierWrite {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: self.name.clone(),
+                    description: self.name.clone(),
+                    parameters: serde_json::json!({"type":"object","properties":{}}),
+                }
+            }
+            fn class(&self) -> ToolClass {
+                ToolClass::Write
+            }
+            async fn call(&self, _args: serde_json::Value, _cx: &ToolCx) -> ToolOutput {
+                self.barrier.wait().await;
+                ToolOutput {
+                    text: self.name.clone(),
+                    is_error: false,
+                }
+            }
+        }
+        let ran = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                run_locked(
+                    scripted_one_call("write", "a1"),
+                    vec![Arc::new(BarrierWrite {
+                        name: "write".into(),
+                        barrier: barrier.clone(),
+                    })],
+                    CwdWriteLock::new(),
+                    CancellationToken::new(),
+                ),
+                run_locked(
+                    scripted_one_call("edit", "b1"),
+                    vec![Arc::new(BarrierWrite {
+                        name: "edit".into(),
+                        barrier,
+                    })],
+                    CwdWriteLock::new(),
+                    CancellationToken::new(),
+                ),
+            )
+        })
+        .await
+        .expect("REQ-3.28 separate CwdWriteLock objects must not block each other");
+        assert_eq!(ran.0, RunStatus::Done);
+        assert_eq!(ran.1, RunStatus::Done);
     }
 }
 

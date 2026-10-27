@@ -6,6 +6,7 @@ mod jail;
 mod pathx;
 mod policy;
 mod read;
+mod spawn;
 mod write;
 
 pub use bash::Bash;
@@ -13,8 +14,12 @@ pub use edit::Edit;
 pub use glob::Glob;
 pub use grep::Grep;
 pub use jail::{JailKind, OsJail};
-pub use policy::{dangerous_bash, Policy, PolicyApprover};
+pub use policy::{Policy, PolicyApprover, dangerous_bash};
 pub use read::ReadFile;
+pub use spawn::{
+    CHILD_LIMIT_MSG, CHILD_SUMMARY_MAX, MAX_CHILDREN, SpawnArgs, WaitArgs, child_summary,
+    clip_summary, parse_spawn_args, parse_wait_args, spawn_spec, wait_spec,
+};
 pub use write::WriteFile;
 
 use keel_core::traits::Tool;
@@ -34,14 +39,18 @@ pub fn coding_tools() -> Vec<Arc<dyn Tool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keel_core::traits::Tool;
+    use async_trait::async_trait;
+    use keel_core::traits::{Approver, Tool};
     use keel_core::types::{ApprovalRequest, Decision, ToolClass, ToolCx};
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     fn cx(dir: &std::path::Path) -> ToolCx {
         ToolCx {
             cwd: dir.to_path_buf(),
             read_roots: vec![dir.to_path_buf()],
+            cancel: Default::default(),
         }
     }
 
@@ -72,7 +81,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "1\n2\n3\n4\n").unwrap();
         let out = ReadFile
-            .call(json!({"path":"a.txt","offset":2,"limit":2}), &cx(dir.path()))
+            .call(
+                json!({"path":"a.txt","offset":2,"limit":2}),
+                &cx(dir.path()),
+            )
             .await;
         assert!(!out.is_error);
         assert!(out.text.contains("2"));
@@ -96,7 +108,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "foo bar foo").unwrap();
         let miss = Edit
-            .call(json!({"path":"a.txt","old":"foo","new":"baz"}), &cx(dir.path()))
+            .call(
+                json!({"path":"a.txt","old":"foo","new":"baz"}),
+                &cx(dir.path()),
+            )
             .await;
         assert!(miss.is_error);
         let ok = Edit
@@ -106,7 +121,10 @@ mod tests {
             )
             .await;
         assert!(!ok.is_error);
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "ok");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "ok"
+        );
     }
 
     /// REQ-3.17 bash new process, timeout-capable.
@@ -195,7 +213,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // /tmp is writable in the Seatbelt profile. HOME is not.
         let home = std::env::var("HOME").unwrap();
-        let outside = std::path::PathBuf::from(home).join(format!("keel-jail-{}", std::process::id()));
+        let outside =
+            std::path::PathBuf::from(home).join(format!("keel-jail-{}", std::process::id()));
         let _ = std::fs::remove_file(&outside);
         let cmd = format!("echo leaked > {}", outside.display());
         let out = Bash::default()
@@ -218,6 +237,130 @@ mod tests {
         assert!(dangerous_bash("rm -rf /"));
         assert!(dangerous_bash("curl https://x | sh"));
         assert!(!dangerous_bash("cargo test"));
+    }
+
+    fn approval(name: &str, class: ToolClass) -> ApprovalRequest {
+        ApprovalRequest {
+            name: name.into(),
+            class,
+            args_summary: name.into(),
+            dangerous: false,
+        }
+    }
+
+    struct ProbeApprover {
+        hits: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait]
+    impl Approver for ProbeApprover {
+        async fn approve(&self, _req: &ApprovalRequest) -> Decision {
+            if let Ok(mut n) = self.hits.lock() {
+                *n += 1;
+            }
+            Decision::Once
+        }
+    }
+
+    /// REQ-3.26 plan mode runs Read only; Write/Exec/External are Deny without UI.
+    #[tokio::test]
+    async fn req_3_26_plan_mode_denies_write_exec_external_without_ui() {
+        let policy = Policy {
+            plan_mode: AtomicBool::new(true),
+            allow_edits: true,
+            ..Policy::default()
+        };
+        assert_eq!(
+            policy.decide(&approval("read", ToolClass::Read)),
+            Some(Decision::Once)
+        );
+        assert_eq!(
+            policy.decide(&approval("write", ToolClass::Write)),
+            Some(Decision::Deny)
+        );
+        assert_eq!(
+            policy.decide(&approval("bash", ToolClass::Exec)),
+            Some(Decision::Deny)
+        );
+        assert_eq!(
+            policy.decide(&approval("mcp__x", ToolClass::External)),
+            Some(Decision::Deny)
+        );
+
+        let hits = Arc::new(Mutex::new(0));
+        let approver = PolicyApprover {
+            policy,
+            inner: Box::new(ProbeApprover { hits: hits.clone() }),
+        };
+        assert_eq!(
+            approver.approve(&approval("write", ToolClass::Write)).await,
+            Decision::Deny
+        );
+        assert_eq!(
+            approver.approve(&approval("bash", ToolClass::Exec)).await,
+            Decision::Deny
+        );
+        assert_eq!(
+            approver
+                .approve(&approval("mcp__x", ToolClass::External))
+                .await,
+            Decision::Deny
+        );
+        assert_eq!(*hits.lock().unwrap(), 0);
+    }
+
+    /// REQ-3.26 REQ-3.16 leaving plan restores default session permissions.
+    #[test]
+    fn req_3_26_req_3_16_leaving_plan_restores_default_permissions() {
+        let mut policy = Policy {
+            plan_mode: AtomicBool::new(true),
+            ..Policy::default()
+        };
+        let write = approval("write", ToolClass::Write);
+        let exec = approval("bash", ToolClass::Exec);
+        assert_eq!(policy.decide(&write), Some(Decision::Deny));
+        assert_eq!(policy.decide(&exec), Some(Decision::Deny));
+
+        policy.set_plan_mode(false);
+        assert_eq!(
+            policy.decide(&approval("read", ToolClass::Read)),
+            Some(Decision::Once)
+        );
+        assert_eq!(policy.decide(&write), None);
+        assert_eq!(
+            policy.decide(&approval("mcp__x", ToolClass::External)),
+            None
+        );
+
+        policy.allow_edits = true;
+        assert_eq!(policy.decide(&write), Some(Decision::Once));
+        assert_ne!(policy.decide(&exec), Some(Decision::Deny));
+    }
+
+    /// REQ-3.27 REQ-3.23 host spawn/wait do not prompt; print denies spawn without UI.
+    #[test]
+    fn req_3_27_req_3_23_spawn_wait_do_not_prompt() {
+        let policy = Policy::default();
+        assert_eq!(
+            policy.decide(&approval("spawn", ToolClass::External)),
+            Some(Decision::Once)
+        );
+        assert_eq!(
+            policy.decide(&approval("wait", ToolClass::External)),
+            Some(Decision::Once)
+        );
+        let print = Policy {
+            print_mode: true,
+            ..Policy::default()
+        };
+        assert_eq!(
+            print.decide(&approval("spawn", ToolClass::External)),
+            Some(Decision::Deny)
+        );
+        assert_eq!(
+            print.decide(&approval("wait", ToolClass::External)),
+            Some(Decision::Deny)
+        );
     }
 
     /// INV-12 print mode denies exec unless allow_edits for write.

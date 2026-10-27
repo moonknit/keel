@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -121,6 +122,8 @@ pub enum ToolClass {
 pub struct ToolCx {
     pub cwd: PathBuf,
     pub read_roots: Vec<PathBuf>,
+    /// Run token. Host spawn/wait bind child tokens to this (REQ-3.3).
+    pub cancel: CancellationToken,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,7 +152,11 @@ pub enum InboxMessage {
     User(String),
     Hook,
     Cron,
-    Subagent,
+    Subagent {
+        call_id: String,
+        text: String,
+        is_error: bool,
+    },
     Steer,
 }
 

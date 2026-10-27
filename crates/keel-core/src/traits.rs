@@ -71,8 +71,12 @@ pub trait Store: Send + Sync {
 }
 
 pub trait ContextSource: Send + Sync {
-    fn assemble(&self, session: &WorkingSession, system: String, tools: Vec<ToolSpec>)
-    -> Assembled {
+    fn assemble(
+        &self,
+        session: &WorkingSession,
+        system: String,
+        tools: Vec<ToolSpec>,
+    ) -> Assembled {
         self.assemble_drop(session, system, tools, 0)
     }
 

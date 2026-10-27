@@ -12,9 +12,9 @@ keel v1. 권위는 이 문서다. 설계 배경은 [runtime.md](../design/runtim
 
 v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 워크스페이스에서 대화를 이어 가며 코드를 읽고 고치고 실행하고, 웹을 검색하고, MCP 도구와 `SKILL.md` 스킬을 쓴다. 대화는 로컬 SQLite에 남는다.
 
-보강: 호스트에 아직 안 붙은 배선(MCP 기동 등록, REPL `/new` `/resume`, `lock_pid` 거부, 파일 로그, `/last` 전문)과 실패 경로(실행 중 취소 짝, bash 한도, jail 기동 실패, 429/overflow 재시도)를 닫는다.
+보강: 한 턴의 읽기 도구 병렬, plan mode(쓰기 전 승인), 1단 서브에이전트(동기 wait·비동기 spawn). 부모에는 위임 요약만 남기고 자식 본문은 별 session에 둔다. 같은 cwd의 쓰기는 에이전트 경계를 넘어 한 줄이다.
 
-하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
+하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리(깊이 2+), 커스텀 에이전트 정의 파일, 에이전트 팀, git worktree 격리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, planner/executor 이중 모델, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
 
 ### 1.3 용어 정의
 
@@ -30,6 +30,9 @@ v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 �
 | hosted tool | OpenAI가 실행하는 도구. v1은 `web_search`만 |
 | skill | Agent Skills 디렉터리 + `SKILL.md`. 도구가 아니라 지시문 |
 | WorkingSession | 열린 session의 메모리 사본. write-through로 DB와 맞춤 |
+| plan mode | 읽기만 허용하는 권한 단계. 사람이 계획을 승인한 뒤에 쓰기를 연다 |
+| 자식 session | `spawn`이 연 별 session. 부모와 lock을 나누지 않는다 |
+| write lock | 같은 cwd의 `write`/`edit`/`bash`를 한 번에 하나만 실행하는 가드 |
 
 ## 2. 전체 설명
 
@@ -56,6 +59,7 @@ flowchart TD
 - MCP 서버 도구 등록.
 - `SKILL.md` 카탈로그와 on-demand 본문, `AGENTS.md`.
 - session 저장·이어하기·목록, 스트리밍 REPL과 print 모드.
+- 읽기 도구 병렬, plan mode, 1단 서브에이전트(`spawn`/`wait`).
 
 ### 2.3 사용자 특성
 
@@ -79,7 +83,7 @@ flowchart TD
 
 #### REQ-3.2 턴과 도구 실행 순서
 
-한 턴은 모델 호출 한 번이다. 한 턴의 여러 로컬 tool call은 직렬로 실행한다. 읽기 병렬은 v1에 없다. 각 호출은 `before_tool` → 실행 → `after_tool`이다.
+한 턴은 모델 호출 한 번이다. 한 턴의 여러 로컬 tool call 중 Read(`read` `grep` `glob` `skill`)는 병렬로 실행한다. Write(`write` `edit`), Exec(`bash`), External(MCP)은 직렬이다. 같은 턴에 읽기와 쓰기가 같이 있으면 읽기 묶음이 끝난 뒤 쓰기를 한다. 각 호출은 `before_tool` → 실행 → `after_tool`이다. 병렬 중 취소여도 결과가 없는 `tool_call`에는 `tool_result`를 붙인다(REQ-3.3).
 
 #### REQ-3.3 취소와 짝 맞춤
 
@@ -87,7 +91,7 @@ flowchart TD
 
 #### REQ-3.4 Inbox와 훅
 
-v1 Inbox는 `User`만 처리한다. `Hook` `Cron` `Subagent` `Steer`는 타입만 예약한다. 훅은 루프 콜백이다: `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`.
+Inbox는 `User`와 `Subagent`(자식 완료 요약)를 처리한다. `Hook` `Cron` `Steer`는 타입만 예약한다. 훅은 루프 콜백이다: `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. `Subagent` 메시지는 부모 transcript에 요약 `tool_result`로만 붙는다. 자식 본문을 펼치지 않는다.
 
 #### REQ-3.5 Event 분리
 
@@ -191,7 +195,7 @@ keel session rm <id>
 
 #### REQ-3.22 REPL
 
-스트리밍 REPL. 텍스트 델타는 도착하는 대로 stdout에 쓰고 flush한다. 모델 SSE를 버퍼링한 뒤 한 번에 그리지 않는다. 마크다운 렌더링과 ratatui는 없다. 도구는 한 줄 요약, `/last`는 직전 도구 출력 전문이다. 승인: `[y]es [a]lways [n]o`. 실행 중 Ctrl-C는 chat을 `interrupted`로 끝낸다. 프롬프트에서 Ctrl-C 두 번 또는 Ctrl-D는 lock을 풀고 종료. 슬래시: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit`. `/new`와 `/resume`은 프로세스 재시작 없이 루프 안에서 session을 바꾸고, help에만 있으면 안 된다. `/compact`는 "v2 예정"만.
+스트리밍 REPL. 텍스트 델타는 도착하는 대로 stdout에 쓰고 flush한다. 모델 SSE를 버퍼링한 뒤 한 번에 그리지 않는다. 마크다운 렌더링과 ratatui는 없다. 도구는 한 줄 요약, `/last`는 직전 도구 출력 전문이다. 승인: `[y]es [a]lways [n]o`. 실행 중 Ctrl-C는 chat을 `interrupted`로 끝낸다. 프롬프트에서 Ctrl-C 두 번 또는 Ctrl-D는 lock을 풀고 종료. 슬래시: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit` `/plan`. `/new`와 `/resume`은 프로세스 재시작 없이 루프 안에서 session을 바꾸고, help에만 있으면 안 된다. `/plan`은 plan mode로 들어가거나, 제시된 계획을 승인·거부한다. `/compact`는 "v2 예정"만.
 
 #### REQ-3.23 print 모드
 
@@ -200,6 +204,26 @@ keel session rm <id>
 #### REQ-3.24 설정 파일
 
 TOML. `~/.keel/config.toml`을 `<repo>/.keel/config.toml`이 덮어쓴다. API 키와 토큰을 넣지 않는다. MCP 헤더의 비밀은 `${VAR}`로만 참조한다. 처음 보는 프로젝트 config는 MCP 기동 전에 한 번 확인한다.
+
+#### REQ-3.26 plan mode
+
+plan mode에서는 Read 클래스만 실행한다. Write·Exec·External은 승인 UI 없이 거부 observation이다. 사람이 `/plan`으로 승인하기 전에는 쓰기를 열지 않는다. 승인은 같은 session에서 일반 권한(REQ-3.16)으로 돌아간다. 계획 텍스트는 어시스턴트 메시지다. 별도 체크리스트 도구와 요약 compaction은 없다. print 모드(`-p`)는 plan mode를 쓰지 않는다.
+
+#### REQ-3.27 1단 서브에이전트
+
+부모 모델은 `spawn`과 `wait` 도구만 쓴다. 호스트가 자식 `Agent::run`을 **새 session**에서 연다. 깊이 1. 자식은 `spawn`/`wait`를 갖지 않는다. 동시에 도는 자식은 최대 4개다. 모델이 위임을 요청할 때만 쓴다. 매 턴 자동 팬아웃은 없다.
+
+- `spawn`: 인자 `task`(필수), `wait`(기본 false). `wait=true`면 이 턴에서 끝날 때까지 막고 요약을 `tool_result`로 붙인다. `wait=false`면 자식 id를 바로 돌려주고 부모 턴은 계속한다.
+- `wait`: 인자 `ids`(생략 시 이 부모가 연 미완료 자식). 끝나면 각 자식의 요약 `tool_result`를 붙인다.
+- 비동기 완료가 부모 턴 사이면 Inbox `Subagent`로 요약을 넣는다(REQ-3.4).
+- 부모 context와 `/last`는 요약(+ 자식 session id)만. 자식의 `tool_call`/`tool_result`는 자식 session에만 있다. 새 `ItemKind`는 만들지 않는다.
+- 자식의 승인 프롬프트는 부모 REPL로 올린다. 거절은 그 자식의 observation이다.
+- print 모드는 `spawn`을 거부한다.
+- 런처는 호스트다. 커널에 두 번째 상태기계를 두지 않는다.
+
+#### REQ-3.28 cwd write lock
+
+같은 session cwd에서 `write` `edit` `bash`는 부모와 자식을 포함해 한 번에 하나만 실행한다. 둘째는 첫째가 끝날 때까지 기다린다. Read는 lock을 잡지 않는다. git worktree로 cwd를 나누지 않는다.
 
 ### 3.2 비기능 요구사항
 
@@ -232,6 +256,6 @@ workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `
 ## 4. 품질 속성
 
 - 복구: 크래시 뒤에도 짝 맞는 transcript로 이어갈 수 있다.
-- 격리: MCP 서버 하나가 죽어도 런은 산다.
+- 격리: MCP 서버 하나가 죽어도 런은 산다. 자식 본문은 부모 context에 들어오지 않는다.
 - 토큰: 오래된 chat 생략으로 한도를 지킨다. 요약 호출은 하지 않는다.
 - 비밀: 키와 토큰이 레포 설정·로그에 남지 않는다.

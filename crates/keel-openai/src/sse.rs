@@ -62,7 +62,9 @@ pub fn data_values(body: &str) -> Vec<Value> {
 pub fn completed_output(events: &[Value]) -> Option<Vec<Value>> {
     events.iter().rev().find_map(|v| {
         if v.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
-            v.pointer("/response/output").and_then(|o| o.as_array()).cloned()
+            v.pointer("/response/output")
+                .and_then(|o| o.as_array())
+                .cloned()
         } else {
             None
         }
@@ -96,6 +98,10 @@ mod tests {
             got.extend(buf.push(chunk));
         }
         assert_eq!(got, full);
-        assert!(got.iter().any(|v| v.get("type").and_then(|t| t.as_str()) == Some("response.output_text.delta")));
+        assert!(
+            got.iter()
+                .any(|v| v.get("type").and_then(|t| t.as_str())
+                    == Some("response.output_text.delta"))
+        );
     }
 }

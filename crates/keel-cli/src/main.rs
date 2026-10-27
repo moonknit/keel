@@ -2,11 +2,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use keel_core::AlwaysDeny;
-use keel_core::agent::Agent;
+use keel_core::agent::{Agent, CwdWriteLock, Inbox};
 use keel_core::assembler::ContextAssembler;
 use keel_core::config::LlmSettings;
 use keel_core::scripted::ScriptedModel;
-use keel_core::traits::{Approver, Model, Store};
+use keel_core::traits::{Approver, ContextSource, Model, Store};
 use keel_core::types::{ApprovalRequest, Decision, Event, ModelEvent, Role, RunStatus, Usage};
 use keel_openai::OpenAiModel;
 use keel_skills::{SkillTool, catalog_text, discover, load_agents_md};
@@ -23,6 +23,7 @@ mod config;
 mod last;
 mod logging;
 mod slash;
+mod spawn;
 
 #[derive(Parser)]
 #[command(name = "keel")]
@@ -108,7 +109,16 @@ async fn run() -> Result<()> {
     let print = cli.prompt.clone();
     let allow_edits = cli.allow_edits;
     if let Some(prompt) = print {
-        let code = run_print(&db, &session.meta.id, &cwd_s, &prompt, allow_edits, &cfg).await?;
+        let code = run_print(
+            &db,
+            &session.meta.id,
+            &cwd_s,
+            &prompt,
+            allow_edits,
+            &cfg,
+            &model_name,
+        )
+        .await?;
         std::process::exit(code);
     }
     repl(&db, &session.meta.id, &cwd, allow_edits, &cfg, &model_name).await
@@ -230,7 +240,8 @@ async fn build_agent(
     print: bool,
     allow_edits: bool,
     cfg: &config::KeelConfig,
-) -> Result<Agent> {
+    model_name: &str,
+) -> Result<(Agent, Arc<PolicyApprover>)> {
     let skills = discover(cwd);
     let mut tools = coding_tools();
     tools.push(Arc::new(SkillTool {
@@ -249,31 +260,56 @@ async fn build_agent(
     } else {
         Arc::new(OpenAiModel::from_env().map_err(into)?)
     };
-    let policy = Policy {
+    let policy_approver = Arc::new(PolicyApprover {
+        policy: session_policy(print, allow_edits),
+        inner: if print {
+            Box::new(AlwaysDeny)
+        } else {
+            Box::new(StdinApprover)
+        },
+    });
+    let approver: Arc<dyn Approver> = policy_approver.clone();
+    let write_lock = CwdWriteLock::new();
+    let assembler: Arc<dyn ContextSource> = Arc::new(ContextAssembler::default());
+    let inbox = Inbox::new();
+    let hub = spawn::ChildHub::new();
+    let spawn = spawn::Spawn {
+        store: store.clone(),
+        model: model.clone(),
+        tools: tools.clone(),
+        approver: approver.clone(),
+        assembler: assembler.clone(),
+        write_lock: write_lock.clone(),
+        system: system.clone(),
+        max_turns: 50,
+        model_name: model_name.into(),
+        inbox: inbox.clone(),
+        hub: hub.clone(),
+    };
+    tools.push(Arc::new(spawn));
+    tools.push(Arc::new(spawn::Wait { hub }));
+    Ok((
+        Agent {
+            model,
+            tools,
+            store,
+            approver,
+            assembler,
+            max_turns: 50,
+            system,
+            write_lock,
+            inbox,
+        },
+        policy_approver,
+    ))
+}
+
+fn session_policy(print: bool, allow_edits: bool) -> Policy {
+    Policy {
         allow_edits,
         print_mode: print,
         ..Policy::default()
-    };
-    let approver: Arc<dyn Approver> = if print {
-        Arc::new(PolicyApprover {
-            policy,
-            inner: Box::new(AlwaysDeny),
-        })
-    } else {
-        Arc::new(PolicyApprover {
-            policy,
-            inner: Box::new(StdinApprover),
-        })
-    };
-    Ok(Agent {
-        model,
-        tools,
-        store,
-        approver,
-        assembler: Arc::new(ContextAssembler::default()),
-        max_turns: 50,
-        system,
-    })
+    }
 }
 
 struct StdinApprover;
@@ -302,10 +338,11 @@ async fn run_print(
     prompt: &str,
     allow_edits: bool,
     cfg: &config::KeelConfig,
+    model_name: &str,
 ) -> Result<i32> {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&keel_home().join("keel.db"))?);
     let _ = db;
-    let agent = build_agent(store, cwd.as_ref(), true, allow_edits, cfg).await?;
+    let (agent, _) = build_agent(store, cwd.as_ref(), true, allow_edits, cfg, model_name).await?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let printer = tokio::spawn(async move {
@@ -340,7 +377,8 @@ async fn repl(
 ) -> Result<()> {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&keel_home().join("keel.db"))?);
     let _ = db;
-    let agent = build_agent(store.clone(), cwd, false, allow_edits, cfg).await?;
+    let (agent, policy_approver) =
+        build_agent(store.clone(), cwd, false, allow_edits, cfg, model).await?;
     let mut rl = DefaultEditor::new()?;
     let mut last_tool = String::new();
     let mut session_id = session_id.to_string();
@@ -358,7 +396,14 @@ async fn repl(
             break;
         }
         if line == "/help" {
-            println!("/new /resume /name /session /skills /last /help /exit");
+            println!("{}", slash::HELP);
+            continue;
+        }
+        if line == "/plan" || line.starts_with("/plan ") {
+            match slash::parse_plan(&line) {
+                Some(cmd) => println!("{}", slash::apply_plan(&policy_approver.policy, cmd)),
+                None => eprintln!("/plan [approve|deny]"),
+            }
             continue;
         }
         if let Some(switch) = slash::parse_session_switch(&line) {
@@ -445,6 +490,28 @@ async fn repl(
     }
     store.close(&session_id).await.map_err(into)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use keel_core::types::{ApprovalRequest, Decision, ToolClass};
+
+    /// REQ-3.26 print mode (`-p`) must not turn plan on; allow_edits still follows print policy.
+    #[test]
+    fn req_3_26_print_does_not_enable_plan() {
+        let policy = session_policy(true, true);
+        assert!(!policy.is_plan_mode());
+        assert_eq!(
+            policy.decide(&ApprovalRequest {
+                name: "write".into(),
+                class: ToolClass::Write,
+                args_summary: "a".into(),
+                dangerous: false,
+            }),
+            Some(Decision::Once)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1,13 +1,23 @@
-//! REPL session switch for `/new` and `/resume` (REQ-3.22).
-//! Kept out of the rustyline loop so tests can drive Store without a TTY.
+//! REPL slash commands: session switch and `/plan` (REQ-3.22, REQ-3.26).
+//! Kept out of the rustyline loop so tests can drive Store/Policy without a TTY.
 
 use keel_core::traits::Store;
 use keel_core::{KeelError, Result, WorkingSession};
+use keel_tools::Policy;
+
+pub const HELP: &str = "/new /resume /name /session /skills /last /help /exit /plan";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSwitch {
     New,
     Resume(Option<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanCommand {
+    Enter,
+    Approve,
+    Deny,
 }
 
 pub fn parse_session_switch(line: &str) -> Option<SessionSwitch> {
@@ -67,6 +77,34 @@ pub async fn apply_session_switch(
             }
             Err(e)
         }
+    }
+}
+
+pub fn parse_plan(line: &str) -> Option<PlanCommand> {
+    if line == "/plan" {
+        return Some(PlanCommand::Enter);
+    }
+    let rest = line.strip_prefix("/plan ")?;
+    match rest.split_whitespace().next().unwrap_or("") {
+        "approve" => Some(PlanCommand::Approve),
+        "deny" => Some(PlanCommand::Deny),
+        _ => None,
+    }
+}
+
+/// Enter turns plan on. Approve restores the same Policy's REQ-3.16 defaults.
+/// Deny leaves writes closed (plan stays on if it was on).
+pub fn apply_plan(policy: &Policy, cmd: PlanCommand) -> &'static str {
+    match cmd {
+        PlanCommand::Enter => {
+            policy.set_plan_mode(true);
+            "plan"
+        }
+        PlanCommand::Approve => {
+            policy.set_plan_mode(false);
+            "approved"
+        }
+        PlanCommand::Deny => "denied",
     }
 }
 
@@ -191,5 +229,53 @@ mod tests {
         .await;
         assert!(err.is_err());
         assert_eq!(meta(&store, &a.meta.id).await.lock_pid, Some(pid()));
+    }
+
+    fn write_req() -> keel_core::types::ApprovalRequest {
+        keel_core::types::ApprovalRequest {
+            name: "write".into(),
+            class: keel_core::types::ToolClass::Write,
+            args_summary: "a".into(),
+            dangerous: false,
+        }
+    }
+
+    /// REQ-3.22 `/plan` enter / approve / deny parse as commands, not prompts.
+    #[test]
+    fn req_3_22_slash_parse_plan() {
+        assert_eq!(parse_plan("/plan"), Some(PlanCommand::Enter));
+        assert_eq!(parse_plan("/plan approve"), Some(PlanCommand::Approve));
+        assert_eq!(parse_plan("/plan  deny  extra"), Some(PlanCommand::Deny));
+        assert!(parse_plan("/plan foo").is_none());
+        assert!(parse_plan("/plans").is_none());
+        assert!(parse_plan("/compact").is_none());
+        assert!(HELP.contains("/plan"));
+    }
+
+    /// REQ-3.26 REQ-3.22 `/plan` denies write; `/plan approve` restores ask on the same Policy.
+    #[test]
+    fn req_3_26_req_3_22_plan_enter_denies_write_approve_asks() {
+        let policy = Policy::default();
+        apply_plan(&policy, PlanCommand::Enter);
+        assert_eq!(
+            policy.decide(&write_req()),
+            Some(keel_core::types::Decision::Deny)
+        );
+        apply_plan(&policy, PlanCommand::Approve);
+        assert!(!policy.is_plan_mode());
+        assert_eq!(policy.decide(&write_req()), None);
+    }
+
+    /// REQ-3.26 REQ-3.22 `/plan deny` does not open writes.
+    #[test]
+    fn req_3_26_req_3_22_plan_deny_keeps_write_denied() {
+        let policy = Policy::default();
+        apply_plan(&policy, PlanCommand::Enter);
+        apply_plan(&policy, PlanCommand::Deny);
+        assert!(policy.is_plan_mode());
+        assert_eq!(
+            policy.decide(&write_req()),
+            Some(keel_core::types::Decision::Deny)
+        );
     }
 }

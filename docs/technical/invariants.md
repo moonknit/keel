@@ -40,3 +40,12 @@ print 모드(`-p`)에서 승인이 필요한 도구는 `--allow-edits`가 허용
 
 ### INV-13
 jail이 켜진 `bash`는 cwd와 임시 디렉터리 밖에 쓰지 못하고, 네트워크를 쓰지 못한다. jail 기동 실패는 호스트 실행으로 바꾸지 않는다.
+
+### INV-14
+같은 cwd의 `write`/`edit`/`bash`는 부모·자식을 포함해 동시에 둘 이상 실행하지 않는다.
+
+### INV-15
+부모 transcript의 위임 결과는 요약과 자식 session id만이다. 자식의 도구 로그를 부모 context에 펼치지 않는다.
+
+### INV-16
+자식은 새 session이다. 부모 session을 다시 열지 않는다. 자식은 `spawn`/`wait`를 갖지 않는다.

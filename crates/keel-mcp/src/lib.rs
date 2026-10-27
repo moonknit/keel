@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use keel_core::traits::Tool;
 use keel_core::types::{ToolClass, ToolCx, ToolOutput, ToolSpec};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -61,17 +61,21 @@ impl McpProcess {
             stdout: Mutex::new(BufReader::new(stdout)),
             next_id: AtomicU64::new(1),
         };
-        let _ = timeout(Duration::from_secs(10), proc.rpc("initialize", json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "keel", "version": "0.1.0"}
-        })))
+        let _ = timeout(
+            Duration::from_secs(10),
+            proc.rpc(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "keel", "version": "0.1.0"}
+                }),
+            ),
+        )
         .await
         .map_err(|_| "connect timeout".to_string())?
         .map_err(|e| e)?;
-        let _ = proc
-            .notify("notifications/initialized", json!({}))
-            .await;
+        let _ = proc.notify("notifications/initialized", json!({})).await;
         Ok(proc)
     }
 
@@ -126,17 +130,16 @@ impl McpProcess {
             .into_iter()
             .filter_map(|t| {
                 Some(ToolSpec {
-                    name: format!(
-                        "{}__{}",
-                        self.name,
-                        t.get("name")?.as_str()?
-                    ),
+                    name: format!("{}__{}", self.name, t.get("name")?.as_str()?),
                     description: t
                         .get("description")
                         .and_then(|d| d.as_str())
                         .unwrap_or("")
                         .into(),
-                    parameters: t.get("inputSchema").cloned().unwrap_or(json!({"type":"object"})),
+                    parameters: t
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or(json!({"type":"object"})),
                 })
             })
             .collect())
@@ -259,7 +262,14 @@ for line in sys.stdin:
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].spec().name, "demo__ping");
         let out = tools[0]
-            .call(json!({}), &ToolCx { cwd: dir.path().into(), read_roots: vec![] })
+            .call(
+                json!({}),
+                &ToolCx {
+                    cwd: dir.path().into(),
+                    read_roots: vec![],
+                    cancel: Default::default(),
+                },
+            )
             .await;
         assert!(!out.is_error);
         assert!(out.text.contains("pong"));

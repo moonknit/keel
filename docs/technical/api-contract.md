@@ -8,7 +8,7 @@ keel v1은 HTTP API를 열지 않는다. 이 문서는 프로세스가 지키는
 
 stdin: REPL 입력, 승인 한 줄. stdout: 텍스트 델타는 도착하는 대로, REPL 도구는 한 줄. `/last`는 직전 도구 출력 전문. `-p`는 텍스트 델타만(도구 줄 없음). stderr: 사람용 진단(키 없음). 디버그 로그는 `$KEEL_HOME/logs/keel-YYYYMMDD.log`.
 
-슬래시 `/new` `/resume`은 같은 프로세스에서 session을 바꾼다. MCP 도구는 기동 시 config에서 등록하며 공개 이름은 `server__tool`.
+슬래시 `/new` `/resume`은 같은 프로세스에서 session을 바꾼다. `/plan`은 plan mode 진입·계획 승인·거부. MCP 도구는 기동 시 config에서 등록하며 공개 이름은 `server__tool`. 서브에이전트 도구 이름은 `spawn` `wait`. 부모 `/last`는 위임 요약이다.
 
 ## 환경 변수
 

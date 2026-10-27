@@ -45,7 +45,7 @@ erDiagram
 | Context | 호출마다 조립 | 저장하지 않음 |
 | SkillRoot | session read_roots | skill 메시지로 복원 |
 
-`Context`와 allowlist는 테이블이 아니다.
+`Context`와 allowlist는 테이블이 아니다. 자식 session은 별 `session` 행이다. `parent_id` 컬럼은 없다. 부모→자식 연결은 부모 `tool_result` 본문의 자식 id다.
 
 ## 관계 규칙
 

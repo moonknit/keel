@@ -822,6 +822,7 @@ dependencies = [
  "predicates",
  "rustyline",
  "serde",
+ "serde_json",
  "tempfile",
  "time",
  "tokio",

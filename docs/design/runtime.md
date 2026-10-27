@@ -226,7 +226,7 @@ keel session rm <id>     archived = 1
 - 아래: 입력. `/` 명령
 - 권한 확인은 입력 줄에서 y/n
 
-슬래시 명령: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit`. `/new`와 `/resume`은 REPL 루프 안에서 session을 바꾼다. `/last`는 직전 도구 출력 전문. `/compact`는 예약.
+슬래시 명령: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit` `/plan`. `/new`와 `/resume`은 REPL 루프 안에서 session을 바꾼다. `/last`는 직전 도구 출력 전문. `/plan`은 plan mode 진입·승인·거부. `/compact`는 예약.
 
 MCP는 `keel-cli` 기동 시 `config.toml`의 서버를 붙여 `Agent.tools`에 넣는다. crate만 두고 연결하지 않으면 안 된다.
 
@@ -252,7 +252,7 @@ ratatui 전체 화면은 v2 호스트다. 같은 Event를 그린다. v1에서 �
 
 Thought는 모델의 텍스트와 reasoning 블록이다. 별도 `Thought:` 필드를 강제하지 않는다. Action은 tool call이다. Observation은 tool result다. 이게 ReAct다.
 
-한 턴의 여러 tool call은 기본을 직렬로 둔다. 읽기 전용 묶음 병렬은 나중에 켠다. pi의 `toolExecution`과 같다.
+한 턴의 Read(`read` `grep` `glob` `skill`)는 병렬이다. Write·Exec·External은 직렬이다. 같은 cwd의 `write` `edit` `bash`는 부모·자식을 포함해 한 줄이다.
 
 훅은 루프 콜백이다. `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. 채널이 아니다.
 
@@ -263,7 +263,7 @@ Inbox 메시지 종류.
 | `User` | 예 | 사람 입력 |
 | `Hook` | 예약 | 외부 훅이 넣은 시스템 이벤트 |
 | `Cron` | 예약 | 스케줄이 넣은 작업 |
-| `Subagent` | 예약 | 자식 런의 결과 |
+| `Subagent` | 예 | 비동기 자식 완료 요약. 부모에 tool_result만 |
 | `Steer` | 예약 | 진행 중 끼어들기. pi steering queue. v1은 Ctrl-C 취소만 |
 
 커널은 메시지를 구분해서 transcript 역할만 다르게 쓴다. 스케줄러와 서브에이전트 런처는 호스트다.
@@ -436,7 +436,8 @@ CLI는 Event를 구독만 한다. 커널은 CLI가 누군지 모른다.
 한다.
 
 - native tool call ReAct 루프
-- Inbox `User`. Ctrl-C 취소
+- Inbox `User`와 `Subagent`. Ctrl-C 취소(미완료 자식 포함)
+- 읽기 도구 병렬, plan mode, `spawn`/`wait` 1단 서브에이전트
 - session / chat / message SQLite와 메모리 WorkingSession. chat 단위 생략
 - `AGENTS.md`
 - `keel -p` print 모드
@@ -449,7 +450,7 @@ CLI는 Event를 구독만 한다. 커널은 CLI가 누군지 모른다.
 하지 않는다.
 
 - 텍스트 ReAct 파서
-- 서브에이전트, 크론 본체, 채널, 대시보드
+- 서브에이전트 트리(깊이 2+), 크론 본체, 채널, 대시보드, worktree 격리
 - 세션 브랜치, fork, ratatui 전체 화면
 - 실행 중 끼어들기(Steer), 요약 compaction, `/compact`
 - 장기 메모리 계층, 그래프, 워크플로 DAG

@@ -3,7 +3,7 @@ use crate::policy::dangerous_bash;
 use async_trait::async_trait;
 use keel_core::traits::Tool;
 use keel_core::types::{ToolClass, ToolCx, ToolOutput, ToolSpec};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
@@ -91,7 +91,7 @@ impl Tool for Bash {
                         e.to_string()
                     },
                     is_error: true,
-                }
+                };
             }
         };
         let tag = match &jail {

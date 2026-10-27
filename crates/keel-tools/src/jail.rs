@@ -52,9 +52,7 @@ impl OsJail {
         if let Some((_, kind)) = TEST_WRAP.with(|c| c.get()) {
             return Some(Self { kind });
         }
-        DETECTED
-            .get_or_init(probe)
-            .map(|kind| Self { kind })
+        DETECTED.get_or_init(probe).map(|kind| Self { kind })
     }
 
     pub fn available() -> bool {

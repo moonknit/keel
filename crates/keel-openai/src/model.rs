@@ -1,14 +1,14 @@
-use crate::sse::{completed_output, SseBuf};
 #[cfg(test)]
 use crate::sse::data_values;
-use crate::{function_tool, responses_url, web_search_tool, OpenAiError};
+use crate::sse::{SseBuf, completed_output};
+use crate::{OpenAiError, function_tool, responses_url, web_search_tool};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use keel_core::config::LlmSettings;
 use keel_core::traits::Model;
 use keel_core::types::{Item, ItemKind, ModelEvent, ModelRequest, Role, ToolSpec, Usage};
 use keel_core::{KeelError, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -80,7 +80,10 @@ fn output_item_to_keel(v: &Value) -> Option<Item> {
             detail: v.clone(),
         },
         "reasoning" => ItemKind::Reasoning {
-            summary: v.pointer("/summary/0/text").and_then(|t| t.as_str()).map(str::to_string),
+            summary: v
+                .pointer("/summary/0/text")
+                .and_then(|t| t.as_str())
+                .map(str::to_string),
         },
         "message" => {
             let text = v
@@ -133,10 +136,16 @@ fn classify_http(status: u16, body: &str) -> HttpFail {
 fn tools_json(specs: &[ToolSpec], web_search: bool) -> Vec<Value> {
     let mut out: Vec<Value> = specs
         .iter()
-        .map(|s| function_tool(&s.name, &s.description).as_object().cloned().map(|mut o| {
-            o.insert("parameters".into(), s.parameters.clone());
-            Value::Object(o)
-        }).unwrap_or_else(|| function_tool(&s.name, &s.description)))
+        .map(|s| {
+            function_tool(&s.name, &s.description)
+                .as_object()
+                .cloned()
+                .map(|mut o| {
+                    o.insert("parameters".into(), s.parameters.clone());
+                    Value::Object(o)
+                })
+                .unwrap_or_else(|| function_tool(&s.name, &s.description))
+        })
         .collect();
     if web_search {
         out.push(web_search_tool());
@@ -189,7 +198,10 @@ impl Model for OpenAiModel {
                 return Err(KeelError::Msg("auth: OpenAI rejected the key".into()));
             }
             if !status.is_success() {
-                let text = resp.text().await.map_err(|e| KeelError::Msg(e.to_string()))?;
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| KeelError::Msg(e.to_string()))?;
                 match classify_http(status.as_u16(), &text) {
                     HttpFail::Auth => {
                         return Err(KeelError::Msg("auth: OpenAI rejected the key".into()));
@@ -249,7 +261,10 @@ async fn read_sse_live(
         }
     }
     if !out.iter().any(|e| matches!(e, ModelEvent::ItemDone(_))) {
-        if let Some(items) = last_completed.as_ref().and_then(|v| completed_output(&[v.clone()])) {
+        if let Some(items) = last_completed
+            .as_ref()
+            .and_then(|v| completed_output(&[v.clone()]))
+        {
             let pos = out
                 .iter()
                 .position(|e| matches!(e, ModelEvent::Completed { .. }))
@@ -283,7 +298,8 @@ fn events_from_value(v: &Value) -> Vec<ModelEvent> {
             let usage = v
                 .pointer("/response/usage")
                 .map(|u| Usage {
-                    input_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    input_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        as u32,
                     output_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
                         as u32,
                 })
@@ -308,7 +324,10 @@ fn events_from_sse(text: &str) -> Vec<ModelEvent> {
                     extra.push(ModelEvent::ItemDone(k));
                 }
             }
-            if let Some(pos) = out.iter().position(|e| matches!(e, ModelEvent::Completed { .. })) {
+            if let Some(pos) = out
+                .iter()
+                .position(|e| matches!(e, ModelEvent::Completed { .. }))
+            {
                 for ev in extra.into_iter().rev() {
                     out.insert(pos, ev);
                 }
@@ -333,7 +352,8 @@ mod tests {
     /// REQ-3.7 raw items are forwarded unchanged.
     #[test]
     fn req_3_7_raw_passthrough() {
-        let raw = json!({"type":"function_call","call_id":"c","name":"echo","arguments":"{}","keep":1});
+        let raw =
+            json!({"type":"function_call","call_id":"c","name":"echo","arguments":"{}","keep":1});
         let item = Item {
             id: "1".into(),
             role: Role::Assistant,
@@ -387,10 +407,7 @@ mod tests {
 
     fn spawn_http(
         replies: Vec<&'static str>,
-    ) -> (
-        String,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) {
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{Read, Write};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -447,10 +464,7 @@ mod tests {
             )
             .await
             .expect("429 then 200");
-        assert!(
-            ev.iter()
-                .any(|e| matches!(e, ModelEvent::Completed { .. }))
-        );
+        assert!(ev.iter().any(|e| matches!(e, ModelEvent::Completed { .. })));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 

@@ -1,15 +1,16 @@
 //! Responses spike. Fixture tests always run. Live path needs KEEL_LIVE=1.
 
-use keel_openai::{
-    function_tool, json_roundtrip, responses_url, web_search_tool, OpenAiError,
-};
 use keel_openai::sse::{completed_output, data_values, event_names};
+use keel_openai::{OpenAiError, function_tool, json_roundtrip, responses_url, web_search_tool};
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn sqlite_roundtrip(items: &[Value]) -> Result<Vec<Value>, rusqlite::Error> {
     let conn = Connection::open_in_memory()?;
-    conn.execute("CREATE TABLE spike (seq INTEGER PRIMARY KEY, raw TEXT NOT NULL)", [])?;
+    conn.execute(
+        "CREATE TABLE spike (seq INTEGER PRIMARY KEY, raw TEXT NOT NULL)",
+        [],
+    )?;
     for (i, item) in items.iter().enumerate() {
         conn.execute(
             "INSERT INTO spike (seq, raw) VALUES (?1, ?2)",
@@ -47,7 +48,11 @@ fn rv_005_function_name_candidates() {
         assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         assert!(name.len() <= 64);
     }
-    assert!(!"server.tool".chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    assert!(
+        !"server.tool"
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    );
 }
 
 async fn live_stream(body: Value) -> Result<(String, Vec<Value>), OpenAiError> {
@@ -69,7 +74,10 @@ async fn live_stream(body: Value) -> Result<(String, Vec<Value>), OpenAiError> {
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
-        return Err(OpenAiError::Msg(format!("HTTP {status}: {}", text.chars().take(400).collect::<String>())));
+        return Err(OpenAiError::Msg(format!(
+            "HTTP {status}: {}",
+            text.chars().take(400).collect::<String>()
+        )));
     }
     let events = data_values(&text);
     Ok((text, events))
@@ -100,7 +108,9 @@ async fn req_3_6_live_store_false_roundtrip() {
     let stored = sqlite_roundtrip(&output).expect("sqlite");
     assert_eq!(stored, output);
 
-    let mut input = vec![json!({"role": "user", "content": "Call echo with text=ping. Then stop. Do not search the web."})];
+    let mut input = vec![
+        json!({"role": "user", "content": "Call echo with text=ping. Then stop. Do not search the web."}),
+    ];
     for item in &stored {
         input.push(item.clone());
         if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
@@ -118,7 +128,10 @@ async fn req_3_6_live_store_false_roundtrip() {
         "tools": [function_tool("echo", "Repeat the text")]
     });
     let (sse2, events2) = live_stream(second).await.expect("replay");
-    assert!(completed_output(&events2).is_some(), "replay failed: {sse2}");
+    assert!(
+        completed_output(&events2).is_some(),
+        "replay failed: {sse2}"
+    );
 
     let search = json!({
         "store": false,

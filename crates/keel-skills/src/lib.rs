@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use keel_core::traits::Tool;
 use keel_core::types::{Item, ItemKind, Role, ToolClass, ToolCx, ToolOutput, ToolSpec};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -131,7 +131,9 @@ pub fn skill_item(meta: &SkillMeta) -> Item {
 pub fn skill_body(meta: &SkillMeta) -> String {
     let path = meta.path.join("SKILL.md");
     let text = fs::read_to_string(path).unwrap_or_default();
-    let body = split_frontmatter(&text).map(|(_, b)| b.to_string()).unwrap_or(text);
+    let body = split_frontmatter(&text)
+        .map(|(_, b)| b.to_string())
+        .unwrap_or(text);
     format!("{body}\n\nskill_root={}", meta.path.display())
 }
 

@@ -2,7 +2,7 @@ use crate::pathx::resolve_write;
 use async_trait::async_trait;
 use keel_core::traits::Tool;
 use keel_core::types::{ToolClass, ToolCx, ToolOutput, ToolSpec};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub struct WriteFile;
 
@@ -30,7 +30,12 @@ impl Tool for WriteFile {
         let contents = args.get("contents").and_then(|v| v.as_str()).unwrap_or("");
         let target = match resolve_write(cx, path) {
             Ok(p) => p,
-            Err(e) => return ToolOutput { text: e, is_error: true },
+            Err(e) => {
+                return ToolOutput {
+                    text: e,
+                    is_error: true,
+                };
+            }
         };
         if let Some(parent) = target.parent() {
             let _ = std::fs::create_dir_all(parent);

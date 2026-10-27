@@ -5,7 +5,7 @@ pub mod sse;
 
 pub use model::OpenAiModel;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAiError {
