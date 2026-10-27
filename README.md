@@ -5,6 +5,7 @@
 턴 루프 하나가 커널이다. 훅, 크론, 서브에이전트는 그 루프에 넣는 메시지다. 채널과 도구, 대시보드는 커널 밖에 둔다.
 
 조사와 설계는 [docs/index.md](docs/index.md)에 있다.
+REPL이 코드를 어떻게 도는지는 [docs/guide/repl.html](docs/guide/repl.html)에 있다.
 
 ## 준비
 

@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>keel REPL 코드 안내</title>
+  <style>
+    :root {
+      --bg: #f6f4ef;
+      --card: #fffdf8;
+      --ink: #1f1b16;
+      --muted: #5c564c;
+      --line: #d9d1c3;
+      --accent: #2f5d50;
+      --code-bg: #1e2430;
+      --code: #e8eef6;
+      --chip: #e7efe9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 17px/1.65 "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main {
+      max-width: 52rem;
+      margin: 0 auto;
+      padding: 2.2rem 1.2rem 4rem;
+    }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { font-size: 1.9rem; margin-bottom: 0.4rem; }
+    h2 {
+      margin-top: 2.4rem;
+      padding-top: 0.4rem;
+      border-top: 1px solid var(--line);
+    }
+    h3 { margin-top: 1.6rem; }
+    p, li { color: var(--ink); }
+    .lead { color: var(--muted); font-size: 1.05rem; }
+    a { color: var(--accent); }
+    nav.toc {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1rem 1.2rem;
+      margin: 1.4rem 0 2rem;
+    }
+    nav.toc ol { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+    .note, .warn {
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      margin: 1rem 0;
+    }
+    .note { background: var(--chip); }
+    .warn { background: #f8ebe0; }
+    code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    code { font-size: 0.88em; background: #efe8dc; padding: 0.1em 0.35em; border-radius: 4px; }
+    pre {
+      background: var(--code-bg);
+      color: var(--code);
+      padding: 1rem 1.1rem;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+    pre .c { color: #9aa7b8; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95rem; }
+    th, td { border: 1px solid var(--line); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: #efe8dc; }
+    .flow {
+      display: grid;
+      gap: 0.45rem;
+      margin: 1rem 0;
+    }
+    .flow div {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.55rem 0.8rem;
+    }
+    footer { margin-top: 3rem; color: var(--muted); font-size: 0.92rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>keel REPL이 돌아가는 길</h1>
+  <p class="lead">
+    Rust를 몰라도 따라갈 수 있게,
+    <code>cargo run -p keel-cli</code>로 대화 화면이 뜰 때
+    어떤 함수가 무엇을 하는지 코드 기준으로 풀어 쓴 안내입니다.
+    사용법 예시는 루트 <a href="../../README.md">README.md</a>에 있습니다.
+  </p>
+
+  <nav class="toc">
+    <strong>차례</strong>
+    <ol>
+      <li><a href="#rust">이 코드에서 자주 나오는 Rust 말</a></li>
+      <li><a href="#start">실행부터 REPL까지</a></li>
+      <li><a href="#session">session을 고르는 법</a></li>
+      <li><a href="#agent">에이전트를 조립하는 법</a></li>
+      <li><a href="#repl">입력 한 줄이 처리되는 법</a></li>
+      <li><a href="#slash">슬래시 명령</a></li>
+      <li><a href="#loop">한 번의 대화가 모델·도구를 도는 법</a></li>
+      <li><a href="#stream">글자가 바로 찍히는 법</a></li>
+      <li><a href="#perm">승인 게이트</a></li>
+      <li><a href="#tools">도구 목록</a></li>
+      <li><a href="#not-yet">아직 REPL에 없는 것</a></li>
+    </ol>
+  </nav>
+
+  <h2 id="rust">1. 이 코드에서 자주 나오는 Rust 말</h2>
+  <table>
+    <tr><th>말</th><th>이 프로젝트에서의 뜻</th></tr>
+    <tr><td><code>fn</code></td><td>함수. <code>repl()</code>은 “대화 화면을 돌리는 함수”입니다.</td></tr>
+    <tr><td><code>struct</code></td><td>여러 값을 묶은 상자. <code>Agent</code>는 모델·도구·저장소를 한곳에 넣습니다.</td></tr>
+    <tr><td><code>enum</code></td><td>여러 경우 중 하나. <code>Event::TextDelta</code>는 “글자 조각이 왔다”는 경우입니다.</td></tr>
+    <tr><td><code>async</code> / <code>await</code></td><td>네트워크나 키보드처럼 기다리는 일을 멈춰 두지 않고 넘깁니다. 모델 응답을 받을 때 씁니다.</td></tr>
+    <tr><td><code>Arc&lt;T&gt;</code></td><td>같은 상자를 여러 곳에서 나눠 갖는 손잡이. 저장소와 도구를 에이전트와 REPL이 같이 봅니다.</td></tr>
+    <tr><td><code>dyn Trait</code></td><td>“이 역할을 하는 무엇이든”. <code>dyn Model</code>은 실제 OpenAI일 수도, 테스트용 가짜일 수도 있습니다.</td></tr>
+    <tr><td><code>mpsc</code></td><td>한쪽으로 이벤트를 보내고 다른 쪽에서 받는 통로. 루프가 말하고, 화면이 듣습니다.</td></tr>
+  </table>
+
+  <h2 id="start">2. 실행부터 REPL까지</h2>
+  <p>
+    바이너리 이름은 <code>keel</code>이고 코드는
+    <code>crates/keel-cli/src/main.rs</code> 한 파일입니다.
+    <code>-p</code>가 없으면 마지막에 <code>repl()</code>로 들어갑니다.
+  </p>
+  <div class="flow">
+    <div>1. <code>main</code> — cwd의 <code>.env</code>를 읽고 <code>run()</code>을 부릅니다.</div>
+    <div>2. <code>run</code> — 플래그를 파싱하고 <code>~/.keel/keel.db</code>를 엽니다.</div>
+    <div>3. <code>session</code> 하위 명령이면 목록/보기/삭제만 하고 끝냅니다.</div>
+    <div>4. 아니면 session을 고르고, <code>-p</code>면 print, 없으면 REPL.</div>
+  </div>
+  <pre><span class="c">// crates/keel-cli/src/main.rs</span>
+#[tokio::main]
+async fn main() {
+    let _ = dotenvy::dotenv();   <span class="c">// .env → 환경 변수</span>
+    if let Err(e) = run().await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+<span class="c">// run() 끝부분. -p 가 없으면 여기로.</span>
+if let Some(prompt) = print {
+    let code = run_print(...).await?;
+    std::process::exit(code);
+}
+repl(&amp;db, &amp;session.meta.id, &amp;cwd, allow_edits).await</pre>
+  <p>
+    <code>KEEL_HOME</code>이 있으면 그 아래 <code>keel.db</code>를 씁니다.
+    없으면 <code>~/.keel</code>입니다. 홈 폴더를 더럽히기 싫으면 README처럼 임시 디렉터리를 주면 됩니다.
+  </p>
+
+  <h2 id="session">3. session을 고르는 법</h2>
+  <p>
+    REPL은 “지금 이 폴더의 대화 하나”에 붙습니다.
+    고르는 함수는 <code>pick_session</code>입니다.
+  </p>
+  <table>
+    <tr><th>플래그</th><th>동작</th></tr>
+    <tr><td><code>--new</code></td><td>새 session을 DB에 만듭니다.</td></tr>
+    <tr><td><code>--resume &lt;id&gt;</code></td><td>그 id를 엽니다.</td></tr>
+    <tr><td>없음</td><td>이 cwd의 최근 session. 없으면 새로 만듭니다.</td></tr>
+  </table>
+  <pre><span class="c">// pick_session</span>
+if cli.new { return db.create_session(cwd, model).await; }
+if let Some(id) = cli.resume.clone().flatten() {
+    return db.open_session(&amp;id).await;
+}
+let list = db.list_sessions(Some(cwd), false).await?;
+if let Some(meta) = list.into_iter().next() {
+    db.open_session(&amp;meta.id).await
+} else {
+    db.create_session(cwd, model).await
+}</pre>
+  <div class="note">
+    session은 저장된 대화 전체입니다. 그 안의 한 번의 질문–응답 묶음이 chat입니다.
+    REPL에서 엔터를 칠 때마다 새 chat이 하나 생깁니다.
+  </div>
+
+  <h2 id="agent">4. 에이전트를 조립하는 법</h2>
+  <p>
+    화면(<code>keel-cli</code>)은 모델을 직접 부르지 않습니다.
+    <code>build_agent</code>가 <code>Agent</code> 상자를 만들고, 이후에는
+    <code>agent.run(...)</code>만 호출합니다.
+    커널은 <code>crates/keel-core/src/agent.rs</code>에 있습니다.
+  </p>
+  <table>
+    <tr><th>칸</th><th>넣는 것</th><th>역할</th></tr>
+    <tr><td><code>model</code></td><td><code>OpenAiModel</code> 또는 <code>ScriptedModel</code></td><td>LLM 호출</td></tr>
+    <tr><td><code>tools</code></td><td>read/grep/glob/write/edit/bash + skill</td><td>모델이 부르는 로컬 도구</td></tr>
+    <tr><td><code>store</code></td><td><code>SqliteStore</code></td><td>대화 저장</td></tr>
+    <tr><td><code>approver</code></td><td>정책 + 키보드 y/n</td><td>위험한 도구를 막을지</td></tr>
+    <tr><td><code>assembler</code></td><td><code>ContextAssembler</code></td><td>다음에 모델에 넣을 창</td></tr>
+    <tr><td><code>system</code></td><td><code>AGENTS.md</code> + 스킬 목록</td><td>시스템 프롬프트</td></tr>
+    <tr><td><code>max_turns</code></td><td>50</td><td>한 chat에서 모델 호출 한도</td></tr>
+  </table>
+  <pre><span class="c">// build_agent — REPL은 print=false, 그래서 키보드 승인을 붙입니다.</span>
+let skills = discover(cwd);
+let mut tools = coding_tools();          <span class="c">// 코딩 도구 6개</span>
+tools.push(Arc::new(SkillTool { skills: skills.clone() }));
+let system = format!("{}\n{}", load_agents_md(cwd), catalog_text(&amp;skills));
+let model = if KEEL_SCRIPTED=1 { ScriptedModel } else { OpenAiModel::from_env() };
+let approver = PolicyApprover { policy, inner: StdinApprover };</pre>
+  <p>
+    일반 실행은 항상 <code>OpenAiModel</code>입니다.
+    <code>KEEL_SCRIPTED=1</code>일 때만 “ok”만 말하는 가짜 모델입니다. 테스트용입니다.
+  </p>
+
+  <h2 id="repl">5. 입력 한 줄이 처리되는 법</h2>
+  <p>
+    <code>repl()</code>은 무한 루프입니다.
+    <code>rustyline</code>이 <code>&gt; </code> 프롬프트를 그리고, 한 줄을 받으면 아래 순서로 봅니다.
+  </p>
+  <div class="flow">
+    <div>빈 줄 → 무시</div>
+    <div>슬래시 명령(<code>/help</code> 등) → 로컬에서 처리하고 모델에 안 보냄</div>
+    <div>그 외 → 사용자 메시지로 <code>agent.run</code></div>
+  </div>
+  <pre><span class="c">// crates/keel-cli/src/main.rs  repl()</span>
+loop {
+    let line = rl.readline("&gt; ")?;
+    let line = line.trim();
+    if line.is_empty() { continue; }
+    if line == "/exit" { break; }
+    <span class="c">// /help /last /skills /name /session /compact /skill: 처리</span>
+    let prompt = if line.starts_with("/skill:") { 스킬 본문 } else { line };
+    <span class="c">// 여기서부터 한 chat</span>
+    agent.run(session_id, prompt, cwd, cancel, tx).await?;
+}
+store.close(session_id).await?;</pre>
+  <p>
+    한 줄을 모델에 넘기기 직전에 세 가지를 같이 켭니다.
+  </p>
+  <ol>
+    <li><strong>이벤트 통로</strong> <code>tx / rx</code> — 루프가 보내는 소식을 화면이 받습니다.</li>
+    <li><strong>취소 토큰</strong> — 다른 작업이 Ctrl-C를 기다리다가 토큰을 꺾습니다.</li>
+    <li><strong>프린터 작업</strong> — <code>rx</code>를 듣는 동안 글자와 도구 줄을 바로 찍습니다.</li>
+  </ol>
+  <p>
+    <code>agent.run</code>이 끝나면 프린터도 끝나고, 직전 도구 요약이 <code>last_tool</code>에 남습니다.
+    루프를 빠져나오면 <code>store.close</code>가 session 잠금(<code>lock_pid</code>)을 풉니다.
+  </p>
+
+  <h2 id="slash">6. 슬래시 명령</h2>
+  <p>
+    <code>/help</code>가 적어 주는 목록과, 실제로 <code>repl()</code>이 처리하는 목록이 조금 다릅니다.
+  </p>
+  <table>
+    <tr><th>입력</th><th>코드가 하는 일</th></tr>
+    <tr><td><code>/exit</code></td><td>루프를 빠져나오고 session을 닫습니다. Ctrl-D도 rustyline이 에러로 받아 같은 효과입니다.</td></tr>
+    <tr><td><code>/help</code></td><td>명령 이름을 한 줄로 출력합니다.</td></tr>
+    <tr><td><code>/last</code></td><td>직전 도구의 이름, 성공 여부, 시간, 줄 수를 출력합니다. 도구 출력 전체는 아닙니다.</td></tr>
+    <tr><td><code>/skills</code></td><td>cwd에서 <code>SKILL.md</code>를 다시 찾아 이름과 설명만 찍습니다.</td></tr>
+    <tr><td><code>/name 제목</code></td><td>지금 session 제목을 DB에 바꿉니다.</td></tr>
+    <tr><td><code>/session</code></td><td>id, cwd, 모델 이름을 출력합니다.</td></tr>
+    <tr><td><code>/compact</code></td><td><code>v2 예정</code>만 출력합니다. 요약을 하지 않습니다.</td></tr>
+    <tr><td><code>/skill:이름</code></td><td>그 스킬 본문과 <code>skill_root=</code>를 <em>사용자 메시지처럼</em> 모델에 넣습니다. 슬래시만으로 끝나지 않습니다.</td></tr>
+    <tr><td>그 외 일반 문장</td><td>그대로 user 텍스트가 됩니다.</td></tr>
+  </table>
+  <div class="warn">
+    <code>/help</code>에는 <code>/new</code>와 <code>/resume</code>이 적혀 있지만,
+    <code>repl()</code> 루프에는 해당 분기가 없습니다.
+    새 session이나 이어하기는 프로세스를 다시 켤 때
+    <code>--new</code> / <code>--resume</code>으로 합니다.
+  </div>
+
+  <h2 id="loop">7. 한 번의 대화가 모델·도구를 도는 법</h2>
+  <p>
+    엔터를 친 뒤의 본체는 <code>Agent::run</code>입니다.
+    “질문 하나 = chat 하나 = 최대 50턴”입니다.
+    한 턴은 모델 호출 한 번입니다.
+  </p>
+  <div class="flow">
+    <div>session을 열고 새 chat을 만듭니다. user 문장을 DB에 붙입니다.</div>
+    <div>오래된 chat이 너무 길면 통째로 빼고 Notice만 잠깐 넣습니다. 저장하지는 않습니다.</div>
+    <div>모델에 system + 최근 대화 + 도구 목록을 보냅니다. 글자 조각은 바로 Event로 나옵니다.</div>
+    <div>모델이 텍스트만 내면 chat을 끝내고 돌아옵니다.</div>
+    <div>모델이 tool call을 내면 하나씩 승인 → 실행 → 결과를 DB에 붙인 뒤 다음 턴으로 갑니다.</div>
+  </div>
+  <pre><span class="c">// crates/keel-core/src/agent.rs  핵심만</span>
+let chat = self.store.begin_chat(session_id, Some(title)).await?;
+self.store.append(&amp;chat.id, user_item).await?;
+
+for turn in 1..=self.max_turns {
+    let assembled = self.assembler.assemble(&amp;session, system, tool_specs);
+    let model_events = self.model.stream(assembled.request, cancel, live_tx).await?;
+
+    let calls = model_events 중에서 ToolCall 만;
+    if calls.is_empty() {
+        end_chat(Done);
+        return Done;
+    }
+    for call in calls {
+        승인 확인;
+        tool.call(args, cwd);
+        store.append(tool_result);
+    }
+}</pre>
+  <p>끝나는 경우 네 가지입니다.</p>
+  <table>
+    <tr><th>상태</th><th>언제</th></tr>
+    <tr><td><code>Done</code></td><td>모델이 도구 없이 텍스트만 냄</td></tr>
+    <tr><td><code>Interrupted</code></td><td>Ctrl-C로 취소 토큰이 꺾임</td></tr>
+    <tr><td><code>Limit</code></td><td>50턴을 다 씀</td></tr>
+    <tr><td><code>Error</code></td><td>지금은 루프가 잘 안 씁니다. CLI print 모드는 이 코드를 1로 매깁니다.</td></tr>
+  </table>
+  <p>
+    도구는 <strong>한 턴 안에서 직렬</strong>입니다. 여러 개를 한 번에 받아도 앞에서부터 하나씩 실행합니다.
+    결과가 없는 tool call을 모델에 다시 보내지 않습니다. 취소되면 <code>interrupted</code> 결과를 합성해 짝을 맞춥니다.
+  </p>
+
+  <h2 id="stream">8. 글자가 바로 찍히는 법</h2>
+  <p>세 층이 이어져야 타자가 나오듯 보입니다.</p>
+  <ol>
+    <li>
+      <code>OpenAiModel::stream</code>이 HTTP 본문을 끝까지 모으지 않고
+      SSE <code>data:</code> 줄을 조각으로 파싱합니다.
+      <code>response.output_text.delta</code>가 오는 즉시 <code>ModelEvent::TextDelta</code>를 보냅니다.
+    </li>
+    <li>
+      <code>Agent::run</code>이 그 델타를 <code>Event::TextDelta</code>로 바꿉니다.
+    </li>
+    <li>
+      REPL 프린터가 받아서 <code>print!</code>하고 <code>flush</code>합니다.
+      도구가 시작되면 <code>▸ 이름 인자</code>, 끝나면 ✓/✗를 한 줄로 찍습니다.
+    </li>
+  </ol>
+  <pre><span class="c">// REPL 프린터</span>
+Event::TextDelta(s) =&gt; { print!("{s}"); stdout.flush(); }
+Event::ToolStart { name, args } =&gt; println!("\\n▸ {name}  {args}");
+Event::ToolEnd { ok, .. } =&gt; println!("  {}", if ok { "✓" } else { "✗" });
+Event::RunEnd { .. } =&gt; println!();</pre>
+  <p>
+    print 모드(<code>-p</code>)는 같은 루프를 쓰지만 프린터는 <code>TextDelta</code>만 보여 줍니다.
+    도구 줄과 승인 UI는 없습니다.
+  </p>
+
+  <h2 id="perm">9. 승인 게이트</h2>
+  <p>
+    도구를 실행하기 전에 <code>PolicyApprover</code>가 먼저 보고,
+    정책이 “모르겠다”고 하면 REPL의 <code>StdinApprover</code>가 키보드를 묻습니다.
+  </p>
+  <pre>  allow bash {"command":"curl https://..."}? [y]es [a]lways [n]o</pre>
+  <table>
+    <tr><th>종류</th><th>REPL 기본</th></tr>
+    <tr><td>Read (<code>read</code> <code>grep</code> <code>glob</code> <code>skill</code>)</td><td>묻지 않고 실행</td></tr>
+    <tr><td>Write (<code>write</code> <code>edit</code>)</td><td>묻습니다. <code>--allow-edits</code>면 자동 허용</td></tr>
+    <tr><td>안전한 <code>bash</code> + OS jail</td><td>Seatbelt/bwrap이 있으면 자동 허용</td></tr>
+    <tr><td>위험한 <code>bash</code> (<code>rm -rf</code>, <code>curl</code>, <code>git push</code> …)</td><td>항상 다시 묻습니다</td></tr>
+    <tr><td><code>a</code> / always</td><td>그 도구 이름을 프로세스 메모리 allowlist에 넣습니다. 디스크에는 안 남습니다</td></tr>
+  </table>
+  <p>
+    정책 코드는 <code>crates/keel-tools/src/policy.rs</code>입니다.
+    Read가 아닌데 <code>Deny</code>이면 도구를 실행하지 않고 observation에 <code>denied</code>를 넣습니다.
+  </p>
+
+  <h2 id="tools">10. 도구 목록</h2>
+  <p>
+    모델이 볼 수 있는 로컬 도구는 <code>coding_tools()</code>와 <code>skill</code>입니다.
+    작업 디렉터리는 session cwd입니다.
+  </p>
+  <table>
+    <tr><th>이름</th><th>하는 일</th><th>클래스</th></tr>
+    <tr><td><code>read</code></td><td>파일 읽기. offset/limit으로 줄 단위</td><td>Read</td></tr>
+    <tr><td><code>grep</code></td><td>정규식으로 내용 검색</td><td>Read</td></tr>
+    <tr><td><code>glob</code></td><td>경로 패턴으로 파일 찾기</td><td>Read</td></tr>
+    <tr><td><code>write</code></td><td>cwd 아래 파일 쓰기. 없는 폴더도 만듦</td><td>Write</td></tr>
+    <tr><td><code>edit</code></td><td><code>old</code>가 정확히 한 번일 때만 바꿈</td><td>Write</td></tr>
+    <tr><td><code>bash</code></td><td>새 셸 한 번. jail이 있으면 네트워크·바깥 쓰기 차단</td><td>Exec</td></tr>
+    <tr><td><code>skill</code></td><td><code>SKILL.md</code> 본문과 루트 경로를 돌려줌</td><td>Read</td></tr>
+  </table>
+  <p>
+    <code>web_search</code>는 로컬 도구가 아닙니다.
+    OpenAI 요청에 hosted 도구로 붙고, 검색은 서버가 합니다.
+    결과는 <code>HostedTool</code> item으로 transcript에 남습니다.
+  </p>
+  <p>
+    스킬 파일은
+    <code>.agents/skills/이름/SKILL.md</code>를 cwd에서 조상으로 올라가며 찾고,
+    그다음 <code>~/.agents/skills</code>, Claude 경로도 봅니다.
+    기동 때는 이름과 설명만 시스템 프롬프트에 넣습니다(대략 4,000자).
+    본문은 <code>/skill:이름</code>이거나 모델이 <code>skill</code> 도구를 부를 때 붙습니다.
+  </p>
+
+  <h2 id="not-yet">11. 아직 REPL에 없는 것</h2>
+  <ul>
+    <li><code>/new</code>, <code>/resume</code> — help에만 있고 루프에 분기가 없습니다.</li>
+    <li>MCP 서버 — <code>keel-mcp</code> crate는 있으나 CLI가 기동 시 연결하지 않습니다.</li>
+    <li>마크다운 렌더, 전체 화면 TUI.</li>
+    <li>대화 중 끼어들기(Steer), 요약 compaction.</li>
+    <li>도구 출력 전문을 <code>/last</code>로 다시 보기. 지금은 한 줄 요약만입니다.</li>
+  </ul>
+
+  <footer>
+    기준 코드: <code>crates/keel-cli/src/main.rs</code>,
+    <code>crates/keel-core/src/agent.rs</code>,
+    <code>crates/keel-tools/src/policy.rs</code>,
+    <code>crates/keel-skills/src/lib.rs</code>.
+    구현이 바뀌면 이 안내도 같이 고칩니다.
+  </footer>
+</main>
+</body>
+</html>
