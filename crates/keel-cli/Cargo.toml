@@ -18,9 +18,14 @@ keel-mcp.workspace = true
 keel-skills.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
+cron = "0.15"
+crossterm = "0.28"
 dotenvy.workspace = true
-rustyline = "15"
+libc = "0.2"
+ratatui = "0.29"
+unicode-width = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

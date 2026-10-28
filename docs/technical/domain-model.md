@@ -1,6 +1,6 @@
 # Domain model
 
-권위: [srs.md](../planning/srs.md) REQ-3.10–3.14, REQ-5.1. 스키마 SQL은 [runtime.md](../design/runtime.md) 「로컬 DB」.
+권위: [srs.md](../planning/srs.md) REQ-3.10–3.14, REQ-5.1, REQ-5.3. 스키마 SQL은 [runtime.md](../design/runtime.md) 「로컬 DB」.
 
 ## 엔티티
 
@@ -8,6 +8,7 @@
 erDiagram
   SESSION ||--o{ CHAT : contains
   CHAT ||--o{ MESSAGE : contains
+  SESSION ||--o{ CRON_JOB : schedules
   SESSION {
     string id PK
     string title
@@ -34,6 +35,16 @@ erDiagram
     string raw
     string provider
   }
+  CRON_JOB {
+    string id PK
+    string cwd
+    string session_id FK
+    string schedule
+    string prompt
+    int allow_edits
+    string allow_bash
+    int enabled
+  }
 ```
 
 | 엔티티 | 수명 | 비고 |
@@ -44,6 +55,7 @@ erDiagram
 | WorkingSession | 프로세스 메모리 | meta + chats + read_roots + allow(메모리 only) |
 | Context | 호출마다 조립 | 저장하지 않음 |
 | SkillRoot | session read_roots | skill 메시지로 복원 |
+| CronJob | 디스크. cwd 또는 session에 묶임 | 권한은 잡 행. session allowlist가 아님 |
 
 `Context`와 allowlist는 테이블이 아니다. 자식 session은 별 `session` 행이다. `parent_id` 컬럼은 없다. 부모→자식 연결은 부모 `tool_result` 본문의 자식 id다.
 
@@ -53,6 +65,8 @@ erDiagram
 - 한 Chat의 Message `seq`는 1부터 연속 유일.
 - 한 Session은 동시에 한 프로세스만 연다(`lock_pid`).
 - 활성 스킬 루트는 Session 범위다. Chat이 바뀌어도 유지된다.
+- CronJob의 `session_id`는 비울 수 있다. 비우면 발화 때 그 cwd의 최근 session을 쓴다.
+- 크론 스케줄러 lock은 session lock과 별개다. 한 프로세스만 스케줄러를 가진다.
 
 ## 상태
 

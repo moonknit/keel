@@ -1,7 +1,7 @@
 # keel 런타임 설계
 
 조사: [lightweight-agent-runtimes.md](../research/lightweight-agent-runtimes.md).
-제품 한 줄: README. 턴 루프 하나가 커널이다. 비동기 자식 완료는 Inbox로 들어온다. 훅은 루프 콜백이다. 도구와 서브에이전트 런처는 호스트다. 크론·채널·대시보드는 아직 없다.
+제품 한 줄: README. 턴 루프 하나가 커널이다. 비동기 자식 완료와 Steer·Cron은 Inbox로 들어온다. 훅은 루프 콜백이다. 도구와 서브에이전트 런처·스케줄러·TUI는 호스트다. 채널과 요약 compact는 없다.
 
 이 문서는 그 커널에 ReAct, 기본 로컬 도구, MCP, `SKILL.md`, 세션 저장, CLI를 어떻게 붙일지 정한다.
 
@@ -21,9 +21,9 @@
 
 들어가지 않는다. 메시지 타입만 예약한다.
 
-- 채널 어댑터. Slack, Telegram, HTTP UI.
-- 대시보드.
-- 크론 스케줄러 본체.
+- 채널 어댑터. Slack, Telegram, 외부 채팅 HTTP.
+- 로컬 HTTP 대시보드. 대시보드는 TUI 패널이다.
+- 요약 compaction과 `/compact` 동작.
 - 서브에이전트 프로세스 트리.
 - 장기 메모리 플랫폼.
 - Docker 샌드박스. `bash` OS jail(Seatbelt/`bwrap`)은 한다.
@@ -220,7 +220,7 @@ keel session rm <id>     archived = 1
 
 `-p`는 대화하지 않는다. 텍스트 델타는 도착하는 대로 쓰고, 도구 줄은 쓰지 않는다. 승인이 필요한 도구는 거부로 처리하고, `--allow-edits`면 `write` `edit`만 허용한다. 종료 코드는 0 완료, 1 오류, 2 `max_turns`, 130 취소. 스크립트와 종단 테스트에 쓴다.
 
-대화 화면은 전체 화면 TUI가 아니다. 스트리밍 REPL이다. goose CLI, Claude Code에 가깝다.
+대화 화면은 전체 화면 TUI다. Event를 구독한다. `-p`는 텍스트만. 대시보드 패널은 같은 TUI 안에 있고 HTTP를 열지 않는다.
 
 - 위: 쌓이는 transcript. user, assistant, tool call, tool result
 - 아래: 입력. `/` 명령
@@ -230,9 +230,9 @@ keel session rm <id>     archived = 1
 
 MCP는 `keel-cli` 기동 시 `config.toml`의 서버를 붙여 `Agent.tools`에 넣는다. crate만 두고 연결하지 않으면 안 된다.
 
-키. 실행 중 Ctrl-C는 현재 chat을 취소한다(`interrupted`). 프롬프트에서 Ctrl-C 두 번이나 Ctrl-D는 종료다. 실행 중 끼어들기 입력은 v1에 없다.
+키. 실행 중 Ctrl-C는 현재 chat을 취소한다(`interrupted`). 실행 중 일반 입력은 Steer다. 프롬프트에서 Ctrl-C 두 번이나 Ctrl-D는 종료다.
 
-ratatui 전체 화면은 v2 호스트다. 같은 Event를 그린다. v1에서 만들지 않는다. crush를 지금 따라가면 커널이 아니라 UI 프로젝트가 된다.
+ratatui는 `keel-cli`만. 코어에 넣지 않는다. crush를 따라가 커널을 UI 프로젝트로 만들지 않는다.
 
 ## 커널: ReAct 루프
 
@@ -258,13 +258,13 @@ Thought는 모델의 텍스트와 reasoning 블록이다. 별도 `Thought:` 필�
 
 Inbox 메시지 종류.
 
-| 종류 | v1 | 의미 |
-|---|---|---|
-| `User` | 예 | 사람 입력 |
-| `Hook` | 예약 | 외부 훅이 넣은 시스템 이벤트 |
-| `Cron` | 예약 | 스케줄이 넣은 작업 |
-| `Subagent` | 예 | 비동기 자식 완료 요약. 부모에 tool_result만 |
-| `Steer` | 예약 | 진행 중 끼어들기. pi steering queue. v1은 Ctrl-C 취소만 |
+| 종류 | 의미 |
+|---|---|
+| `User` | 사람 입력. 새 chat |
+| `Hook` | 예약. 외부 훅 시스템 이벤트 |
+| `Cron` | 스케줄이 넣은 프롬프트. 호스트 스케줄러 |
+| `Subagent` | 비동기 자식 완료 요약. 부모에 tool_result만 |
+| `Steer` | 진행 중 끼어들기. 다음 턴 전에 user 텍스트. 도구는 끊지 않음 |
 
 커널은 메시지를 구분해서 transcript 역할만 다르게 쓴다. 스케줄러와 서브에이전트 런처는 호스트다.
 
@@ -450,9 +450,9 @@ CLI는 Event를 구독만 한다. 커널은 CLI가 누군지 모른다.
 하지 않는다.
 
 - 텍스트 ReAct 파서
-- 서브에이전트 트리(깊이 2+), 크론 본체, 채널, 대시보드, worktree 격리
-- 세션 브랜치, fork, ratatui 전체 화면
-- 실행 중 끼어들기(Steer), 요약 compaction, `/compact`
+- 서브에이전트 트리(깊이 2+), 채널, HTTP 대시보드, worktree 격리
+- 세션 브랜치, fork
+- 요약 compaction, `/compact` 동작
 - 장기 메모리 계층, 그래프, 워크플로 DAG
 - 스킬 본문·references 자동 전체 주입
 - 스킬 전용 파일 도구, 커널 안 코드 인터프리터

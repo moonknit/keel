@@ -128,7 +128,7 @@ impl Agent {
                 });
                 return Ok(RunStatus::Interrupted);
             }
-            self.drain_inbox(&chat.id).await?;
+            self.drain_inbox(session_id, &chat.id).await?;
             let _ = events.send(Event::TurnStart { turn });
             session = self.store.open_session(session_id).await?;
             let model_events = match self.call_model(&session, cancel.clone(), &events).await {
@@ -257,7 +257,7 @@ impl Agent {
         Ok(RunStatus::Limit)
     }
 
-    async fn drain_inbox(&self, chat_id: &str) -> Result<()> {
+    async fn drain_inbox(&self, session_id: &str, chat_id: &str) -> Result<()> {
         for msg in self.inbox.drain().await {
             match msg {
                 InboxMessage::Subagent {
@@ -269,10 +269,19 @@ impl Agent {
                         .append(chat_id, Item::tool_result(call_id, text, is_error))
                         .await?;
                 }
-                InboxMessage::User(_)
-                | InboxMessage::Hook
-                | InboxMessage::Cron
-                | InboxMessage::Steer => {}
+                InboxMessage::Steer { text } => {
+                    self.store
+                        .append(chat_id, Item::text(crate::types::Role::User, text))
+                        .await?;
+                }
+                InboxMessage::Cron { prompt } => {
+                    let title = prompt.lines().next().unwrap_or(&prompt);
+                    let chat = self.store.begin_chat(session_id, Some(title)).await?;
+                    self.store
+                        .append(&chat.id, Item::text(crate::types::Role::User, prompt))
+                        .await?;
+                }
+                InboxMessage::User(_) | InboxMessage::Hook => {}
             }
         }
         Ok(())

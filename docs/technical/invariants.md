@@ -3,7 +3,7 @@
 테스트 이름에 `INV-n`을 그대로 적는다.
 
 ### INV-1
-`keel-core`는 rusqlite, reqwest, rmcp, clap, rustyline, 파일/프로세스 도구 crate를 의존하지 않는다.
+`keel-core`는 rusqlite, reqwest, rmcp, clap, rustyline, ratatui, 파일/프로세스 도구 crate를 의존하지 않는다.
 
 ### INV-2
 OpenAI 요청은 항상 `store: false`다. 서버 conversation id로 resume하지 않는다.
@@ -33,7 +33,7 @@ MCP 도구 공개 이름은 `<server>__<tool>`이다. 점(`.`) 구분 이름을 
 같은 session을 `lock_pid`가 살아있는 두 프로세스가 동시에 열지 않는다.
 
 ### INV-11
-allowlist와 승인 결과는 디스크에 쓰지 않는다. 프로세스를 다시 열면 다시 묻는다.
+대화 session의 allowlist와 승인 결과는 디스크에 쓰지 않는다. 프로세스를 다시 열면 다시 묻는다. 크론 잡 정책(`allow_edits`, `allow_bash`)은 `cron_job` 행에 둔다.
 
 ### INV-12
 print 모드(`-p`)에서 승인이 필요한 도구는 `--allow-edits`가 허용하는 Write를 제외하고 실행하지 않는다.
@@ -55,3 +55,12 @@ jail이 켜진 `bash`는 cwd와 임시 디렉터리 밖에 쓰지 못하고, 네
 
 ### INV-18
 훅은 루프 콜백이다. Inbox `Hook` 메시지 처리로 대체하지 않는다. `should_stop`으로 런을 끝낼 때도 짝 없는 `tool_call`에 result를 붙인다.
+
+### INV-19
+`Steer`는 진행 중 도구를 취소하지 않는다. 다음 모델 호출 전에 user 텍스트로 붙는다.
+
+### INV-20
+크론 스케줄러는 한 프로세스만 가진다. TUI와 `keel serve`가 동시에 잡을 돌리지 않는다.
+
+### INV-21
+대시보드 패널은 대화를 시작하지 않는다. HTTP 서버를 열지 않는다.

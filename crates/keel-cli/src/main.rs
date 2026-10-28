@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use keel_core::AlwaysDeny;
 use keel_core::agent::{Agent, CwdWriteLock, Inbox};
@@ -7,12 +6,11 @@ use keel_core::assembler::ContextAssembler;
 use keel_core::config::LlmSettings;
 use keel_core::scripted::ScriptedModel;
 use keel_core::traits::{Approver, ContextSource, Model, Store};
-use keel_core::types::{ApprovalRequest, Decision, Event, ModelEvent, Role, RunStatus, Usage};
+use keel_core::types::{Event, ModelEvent, Role, RunStatus, Usage};
 use keel_openai::OpenAiModel;
 use keel_skills::{SkillTool, catalog_text, discover, load_agents_md};
 use keel_store::SqliteStore;
 use keel_tools::{Policy, PolicyApprover, default_tools};
-use rustyline::DefaultEditor;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,10 +18,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 mod config;
+mod cron;
+mod dashboard;
 mod last;
 mod logging;
 mod slash;
 mod spawn;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "keel")]
@@ -47,6 +48,33 @@ enum Cmd {
     Session {
         #[command(subcommand)]
         action: SessionCmd,
+    },
+    Serve,
+    Cron {
+        #[command(subcommand)]
+        action: CronCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCmd {
+    List,
+    Add {
+        #[arg(long)]
+        schedule: String,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, default_value_t = false)]
+        allow_edits: bool,
+        #[arg(long, default_value = "")]
+        allow_bash: String,
+    },
+    Rm {
+        id: String,
     },
 }
 
@@ -78,7 +106,7 @@ async fn run() -> Result<()> {
     let home = keel_home();
     std::fs::create_dir_all(&home).ok();
     let _logging = logging::init(&home)?;
-    let db = SqliteStore::open(&home.join("keel.db"))?;
+    let db = Arc::new(SqliteStore::open(&home.join("keel.db"))?);
     let cwd = std::env::current_dir()?;
     let cwd_s = cwd.to_string_lossy().into_owned();
     let mut cfg = config::load(&home, &cwd)?;
@@ -97,7 +125,16 @@ async fn run() -> Result<()> {
 
     match cli.cmd {
         Some(Cmd::Session { action }) => {
-            return session_cmd(&db, &cwd_s, action).await;
+            return session_cmd(db.as_ref(), &cwd_s, action).await;
+        }
+        Some(Cmd::Serve) => {
+            let model_name = LlmSettings::from_env()
+                .map(|s| s.model)
+                .unwrap_or_else(|_| "unknown".into());
+            return run_serve(db, &cwd, &cfg, &model_name).await;
+        }
+        Some(Cmd::Cron { action }) => {
+            return cron_cmd(db.as_ref(), &cwd_s, action);
         }
         None => {}
     }
@@ -105,12 +142,12 @@ async fn run() -> Result<()> {
     let model_name = LlmSettings::from_env()
         .map(|s| s.model)
         .unwrap_or_else(|_| "unknown".into());
-    let session = pick_session(&db, &cwd_s, &model_name, &cli).await?;
+    let session = pick_session(db.as_ref(), &cwd_s, &model_name, &cli).await?;
     let print = cli.prompt.clone();
     let allow_edits = cli.allow_edits;
     if let Some(prompt) = print {
         let code = run_print(
-            &db,
+            db.as_ref(),
             &session.meta.id,
             &cwd_s,
             &prompt,
@@ -121,7 +158,31 @@ async fn run() -> Result<()> {
         .await?;
         std::process::exit(code);
     }
-    repl(&db, &session.meta.id, &cwd, allow_edits, &cfg, &model_name).await
+    if !tui::interactive_allowed(io::stdin().is_terminal()) {
+        anyhow::bail!("TTY required for interactive keel");
+    }
+    let store: Arc<dyn Store> = db.clone();
+    let (channel, approvals) = tui::ChannelApprover::pair();
+    let (agent, policy_approver) = build_agent(
+        store,
+        &cwd,
+        false,
+        allow_edits,
+        &cfg,
+        &model_name,
+        Box::new(channel),
+    )
+    .await?;
+    tui::run(
+        db,
+        &session.meta.id,
+        &cwd,
+        agent,
+        policy_approver,
+        approvals,
+        &model_name,
+    )
+    .await
 }
 
 fn keel_home() -> PathBuf {
@@ -195,6 +256,94 @@ async fn session_cmd(db: &SqliteStore, cwd: &str, action: SessionCmd) -> Result<
     Ok(())
 }
 
+fn cron_cmd(db: &SqliteStore, cwd: &str, action: CronCmd) -> Result<()> {
+    match action {
+        CronCmd::List => {
+            for job in db.list_cron(Some(cwd))? {
+                println!(
+                    "{}  {}  {}  {}",
+                    job.id,
+                    job.schedule,
+                    if job.enabled { "on" } else { "off" },
+                    job.prompt
+                );
+            }
+        }
+        CronCmd::Add {
+            schedule,
+            prompt,
+            title,
+            session,
+            allow_edits,
+            allow_bash,
+        } => {
+            cron::parse_schedule(&schedule)?;
+            let job = db.add_cron(
+                title.as_deref(),
+                cwd,
+                session.as_deref(),
+                &schedule,
+                &prompt,
+                allow_edits,
+                &allow_bash,
+            )?;
+            println!("{}", job.id);
+        }
+        CronCmd::Rm { id } => {
+            db.delete_cron(&id)?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_serve(
+    db: Arc<SqliteStore>,
+    cwd: &std::path::Path,
+    cfg: &config::KeelConfig,
+    model_name: &str,
+) -> Result<()> {
+    let me = i64::from(std::process::id());
+    if !db.acquire_scheduler(me)? {
+        anyhow::bail!("scheduler lock held by another process");
+    }
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        stop.cancel();
+    });
+    while !cancel.is_cancelled() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let actions = cron::tick(db.as_ref(), now, me, None, false, None).await;
+        for action in actions {
+            if let cron::DueAction::Run {
+                session_id,
+                job_id,
+                prompt,
+            } = action
+            {
+                if let Ok(job) = db.get_cron(&job_id) {
+                    match build_cron_agent(db.clone(), cwd, cfg, model_name, &job).await {
+                        Ok(agent) => {
+                            let _ = cron::fire_run(&agent, &session_id, &prompt, &job.cwd).await;
+                        }
+                        Err(e) => eprintln!("cron {job_id}: {e}"),
+                    }
+                }
+            }
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+        }
+    }
+    db.release_scheduler(me)?;
+    Ok(())
+}
+
 async fn pick_session(
     db: &SqliteStore,
     cwd: &str,
@@ -250,6 +399,7 @@ async fn build_agent(
     allow_edits: bool,
     cfg: &config::KeelConfig,
     model_name: &str,
+    inner: Box<dyn Approver>,
 ) -> Result<(Agent, Arc<PolicyApprover>)> {
     let skills = discover(cwd);
     let mut tools = default_tools();
@@ -271,11 +421,7 @@ async fn build_agent(
     };
     let policy_approver = Arc::new(PolicyApprover {
         policy: session_policy(print, allow_edits),
-        inner: if print {
-            Box::new(AlwaysDeny)
-        } else {
-            Box::new(StdinApprover)
-        },
+        inner,
     });
     let approver: Arc<dyn Approver> = policy_approver.clone();
     let write_lock = CwdWriteLock::new();
@@ -314,30 +460,52 @@ async fn build_agent(
     ))
 }
 
+async fn build_cron_agent(
+    db: Arc<SqliteStore>,
+    cwd: &std::path::Path,
+    cfg: &config::KeelConfig,
+    model_name: &str,
+    job: &keel_store::CronJob,
+) -> Result<Agent> {
+    let store: Arc<dyn Store> = db;
+    let skills = discover(cwd);
+    let mut tools = default_tools();
+    tools.push(Arc::new(SkillTool {
+        skills: skills.clone(),
+    }));
+    tools.extend(attach_mcp_tools(cfg).await);
+    let system = format!("{}\n{}", load_agents_md(cwd), catalog_text(&skills));
+    let model: Arc<dyn Model> = if std::env::var("KEEL_SCRIPTED").ok().as_deref() == Some("1") {
+        Arc::new(ScriptedModel::new(vec![vec![
+            ModelEvent::TextDelta("ok".into()),
+            ModelEvent::ItemDone(keel_core::Item::text(Role::Assistant, "ok")),
+            ModelEvent::Completed {
+                usage: Usage::default(),
+            },
+        ]]))
+    } else {
+        Arc::new(OpenAiModel::from_env().map_err(into)?)
+    };
+    let _ = model_name;
+    Ok(Agent {
+        model,
+        tools,
+        store,
+        approver: Arc::new(cron::CronApprover::from_job(job)),
+        assembler: Arc::new(ContextAssembler::default()),
+        max_turns: 50,
+        system,
+        write_lock: CwdWriteLock::new(),
+        inbox: Inbox::new(),
+        hooks: None,
+    })
+}
+
 fn session_policy(print: bool, allow_edits: bool) -> Policy {
     Policy {
         allow_edits,
         print_mode: print,
         ..Policy::default()
-    }
-}
-
-struct StdinApprover;
-
-#[async_trait]
-impl Approver for StdinApprover {
-    async fn approve(&self, req: &ApprovalRequest) -> Decision {
-        eprintln!(
-            "  allow {} {}? [y]es [a]lways [n]o",
-            req.name, req.args_summary
-        );
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        match line.trim() {
-            "a" | "always" => Decision::Always,
-            "n" | "no" => Decision::Deny,
-            _ => Decision::Once,
-        }
     }
 }
 
@@ -352,7 +520,16 @@ async fn run_print(
 ) -> Result<i32> {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&keel_home().join("keel.db"))?);
     let _ = db;
-    let (agent, _) = build_agent(store, cwd.as_ref(), true, allow_edits, cfg, model_name).await?;
+    let (agent, _) = build_agent(
+        store,
+        cwd.as_ref(),
+        true,
+        allow_edits,
+        cfg,
+        model_name,
+        Box::new(AlwaysDeny),
+    )
+    .await?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let printer = tokio::spawn(async move {
@@ -375,131 +552,6 @@ async fn run_print(
         RunStatus::Limit => 2,
         RunStatus::Interrupted => 130,
     })
-}
-
-async fn repl(
-    db: &SqliteStore,
-    session_id: &str,
-    cwd: &std::path::Path,
-    allow_edits: bool,
-    cfg: &config::KeelConfig,
-    model: &str,
-) -> Result<()> {
-    let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&keel_home().join("keel.db"))?);
-    let _ = db;
-    let (agent, policy_approver) =
-        build_agent(store.clone(), cwd, false, allow_edits, cfg, model).await?;
-    let mut rl = DefaultEditor::new()?;
-    let mut last_tool = String::new();
-    let mut session_id = session_id.to_string();
-    let cwd_s = cwd.to_string_lossy().into_owned();
-    loop {
-        let line = match rl.readline("> ") {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-        if line == "/exit" {
-            break;
-        }
-        if line == "/help" {
-            println!("{}", slash::HELP);
-            continue;
-        }
-        if line == "/plan" || line.starts_with("/plan ") {
-            match slash::parse_plan(&line) {
-                Some(cmd) => println!("{}", slash::apply_plan(&policy_approver.policy, cmd)),
-                None => eprintln!("/plan [approve|deny]"),
-            }
-            continue;
-        }
-        if let Some(switch) = slash::parse_session_switch(&line) {
-            match slash::apply_session_switch(store.as_ref(), &session_id, &cwd_s, model, switch)
-                .await
-            {
-                Ok(new_id) => {
-                    session_id = new_id;
-                    println!("{session_id}");
-                }
-                Err(e) => eprintln!("{e}"),
-            }
-            continue;
-        }
-        if line == "/last" {
-            println!("{last_tool}");
-            continue;
-        }
-        if line == "/skills" {
-            for s in discover(cwd) {
-                println!("{}  {}", s.name, s.description);
-            }
-            continue;
-        }
-        if let Some(name) = line.strip_prefix("/name ") {
-            store.rename(&session_id, name).await.map_err(into)?;
-            continue;
-        }
-        if line == "/session" {
-            let ws = store.open_session(&session_id).await.map_err(into)?;
-            println!("{}  {}  {}", ws.meta.id, ws.meta.cwd, ws.meta.model);
-            continue;
-        }
-        if line == "/compact" {
-            println!("v2 예정");
-            continue;
-        }
-        let prompt = if let Some(rest) = line.strip_prefix("/skill:") {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            if let Some(meta) = discover(cwd).into_iter().find(|s| s.name == name) {
-                keel_skills::skill_body(&meta)
-            } else {
-                format!("unknown skill {name}")
-            }
-        } else {
-            line
-        };
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        let cancel_c = cancel.clone();
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            cancel_c.cancel();
-        });
-        let printer = tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    Event::TextDelta(s) => {
-                        print!("{s}");
-                        let _ = io::stdout().flush();
-                    }
-                    Event::ToolStart { name, args } => println!("\n▸ {name}  {args}"),
-                    Event::ToolEnd { ok, .. } => {
-                        println!("  {}", if ok { "✓" } else { "✗" });
-                    }
-                    Event::RunEnd { .. } => println!(),
-                    _ => {}
-                }
-            }
-        });
-        let status = agent
-            .run(&session_id, &prompt, &cwd_s, cancel, tx)
-            .await
-            .map_err(into)?;
-        let _ = printer.await;
-        if let Ok(ws) = store.open_session(&session_id).await {
-            if let Some(output) = last::last_tool_output(&ws) {
-                last_tool = output.to_string();
-            }
-        }
-        if status == RunStatus::Interrupted {
-            println!("interrupted");
-        }
-    }
-    store.close(&session_id).await.map_err(into)?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -151,13 +151,17 @@ pub enum Decision {
 pub enum InboxMessage {
     User(String),
     Hook,
-    Cron,
+    Cron {
+        prompt: String,
+    },
     Subagent {
         call_id: String,
         text: String,
         is_error: bool,
     },
-    Steer,
+    Steer {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

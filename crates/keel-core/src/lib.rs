@@ -39,6 +39,7 @@ mod inv_tests {
             "rmcp",
             "clap",
             "rustyline",
+            "ratatui",
             "async-openai",
         ] {
             assert!(
@@ -1346,6 +1347,112 @@ mod loop_tests {
         .await;
         assert_eq!(status, RunStatus::Done);
         assert_eq!(n.load(Ordering::SeqCst), 1);
+    }
+
+    /// REQ-3.31 INV-19 Steer appends user text to the running chat before the next model call.
+    #[tokio::test]
+    async fn req_3_31_inv19_steer_appends_user_text() {
+        let inbox = Inbox::default();
+        inbox
+            .push(InboxMessage::Steer {
+                text: "use the other file".into(),
+            })
+            .await;
+        let model = ScriptedModel::new(vec![vec![
+            ModelEvent::ItemDone(item_text("ok")),
+            ModelEvent::Completed {
+                usage: Default::default(),
+            },
+        ]]);
+        let store = Arc::new(MemoryStore::default());
+        let session = store.create_session("/tmp", "test-model").await.unwrap();
+        let agent = Agent {
+            model: Arc::new(model),
+            tools: vec![],
+            store: store.clone(),
+            approver: Arc::new(AlwaysAllow),
+            assembler: Arc::new(ContextAssembler::default()),
+            max_turns: 3,
+            system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox,
+            hooks: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let status = agent
+            .run(
+                &session.meta.id,
+                "hello",
+                "/tmp",
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, RunStatus::Done);
+        let ws = store.open_session(&session.meta.id).await.unwrap();
+        let users: Vec<_> = ws.chats[0]
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Text { text } if i.role == Role::User => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["hello", "use the other file"]);
+    }
+
+    /// REQ-3.32 Cron drain opens a new chat with the job prompt.
+    #[tokio::test]
+    async fn req_3_32_cron_opens_new_chat() {
+        let inbox = Inbox::default();
+        inbox
+            .push(InboxMessage::Cron {
+                prompt: "morning check".into(),
+            })
+            .await;
+        let model = ScriptedModel::new(vec![vec![
+            ModelEvent::ItemDone(item_text("ok")),
+            ModelEvent::Completed {
+                usage: Default::default(),
+            },
+        ]]);
+        let store = Arc::new(MemoryStore::default());
+        let session = store.create_session("/tmp", "test-model").await.unwrap();
+        let agent = Agent {
+            model: Arc::new(model),
+            tools: vec![],
+            store: store.clone(),
+            approver: Arc::new(AlwaysAllow),
+            assembler: Arc::new(ContextAssembler::default()),
+            max_turns: 3,
+            system: "test".into(),
+            write_lock: CwdWriteLock::default(),
+            inbox,
+            hooks: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        agent
+            .run(
+                &session.meta.id,
+                "hello",
+                "/tmp",
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .unwrap();
+        let ws = store.open_session(&session.meta.id).await.unwrap();
+        assert_eq!(ws.chats.len(), 2);
+        let cron_users: Vec<_> = ws.chats[1]
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Text { text } if i.role == Role::User => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cron_users, ["morning check"]);
     }
 }
 

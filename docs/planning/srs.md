@@ -1,6 +1,6 @@
 # Software Requirements Specification
 
-keel v1. 권위는 이 문서다. 설계 배경은 [runtime.md](../design/runtime.md), 결정 근거는 [청사진](../reference/261027-140721-blueprint.md).
+keel. 권위는 이 문서다. v1은 커널·REPL·도구다. 이번 보강은 TUI·Steer·로컬 크론·TUI 대시보드 패널이다. 설계 배경은 [runtime.md](../design/runtime.md), 결정 근거는 [청사진](../reference/261027-140721-blueprint.md).
 
 ## 1. 소개
 
@@ -12,9 +12,9 @@ keel v1. 권위는 이 문서다. 설계 배경은 [runtime.md](../design/runtim
 
 v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 cwd에서 대화를 이어 가며 파일을 읽고 고치고 명령을 실행하고, 웹을 검색하고, MCP 도구와 `SKILL.md` 스킬을 쓴다. 대화는 로컬 SQLite에 남는다.
 
-보강: 한 턴의 읽기 도구 병렬, plan mode(쓰기 전 승인), 1단 서브에이전트(동기 wait·비동기 spawn). 부모에는 위임 요약만 남기고 자식 본문은 별 session에 둔다. 같은 cwd의 쓰기는 에이전트 경계를 넘어 한 줄이다. MCP 클라이언트는 `rmcp`다. stdio와 streamable HTTP를 기동 시 붙인다. 훅은 루프 콜백 네 개다.
+보강: 한 턴의 읽기 도구 병렬, plan mode, 1단 서브에이전트, MCP `rmcp`, 훅 콜백 네 개. 대화형 기본 호스트는 전체 화면 TUI다. 실행 중 Steer. 로컬 크론. 세션·런·잡은 TUI 대시보드 패널에서 본다.
 
-하지 않는다: 채널 어댑터, 대시보드, 크론 본체, 서브에이전트 트리(깊이 2+), 커스텀 에이전트 정의 파일, 에이전트 팀, git worktree 격리, 장기 메모리, Docker 샌드박스, ratatui 전체 화면, 실행 중 끼어들기(Steer), 요약 compaction, planner/executor 이중 모델, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, MCP resources/prompts/sampling/subscriptions, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
+하지 않는다: 채널 어댑터(Slack, Telegram, 외부 채팅 HTTP), 로컬 HTTP 대시보드, 요약 compaction과 `/compact` 동작, 서브에이전트 트리(깊이 2+), 커스텀 에이전트 정의 파일, 에이전트 팀, git worktree 격리, 장기 메모리, Docker 샌드박스, planner/executor 이중 모델, 다른 모델 제공자, OpenAI hosted shell/code_interpreter/hosted MCP, MCP resources/prompts/sampling/subscriptions, 별도 검색 API, 도구 검색 층, 웹/다사용자 호스트.
 
 ### 1.3 용어 정의
 
@@ -35,6 +35,10 @@ v1은 CLI 호스트 하나와 커널 루프 하나를 만든다. 사용자는 cw
 | write lock | 같은 cwd의 `write`/`edit`/`bash`를 한 번에 하나만 실행하는 가드 |
 | hook | 루프 콜백. `before_tool` `after_tool` `prepare_next_turn` `should_stop`. Inbox `Hook` 메시지와 다르다 |
 | rmcp | 공식 Rust MCP SDK. `keel-mcp`만 의존한다 |
+| Steer | 실행 중 끼어들기 입력. 현재 도구를 끊지 않고 다음 모델 호출 전에 transcript에 붙는다 |
+| CronJob | 로컬 스케줄 행. prompt와 권한 정책을 디스크에 둔다 |
+| 잡 정책 | 크론 런의 승인. 기본은 print 모드와 같다. session allowlist와 다르다 |
+| 대시보드 패널 | TUI 안의 세션·런·잡 화면. HTTP가 아니고 채팅 입구가 아니다 |
 
 ## 2. 전체 설명
 
@@ -61,8 +65,9 @@ flowchart TD
 - MCP 서버 도구 등록. `rmcp`로 stdio와 streamable HTTP. 프로토콜은 `2026-07-28`과 하위 핸드셰이크를 협상한다.
 - 루프 훅 콜백. `before_tool` `after_tool` `prepare_next_turn` `should_stop`.
 - `SKILL.md` 카탈로그와 on-demand 본문, `AGENTS.md`.
-- session 저장·이어하기·목록, 스트리밍 REPL과 print 모드.
+- session 저장·이어하기·목록, TUI 대화와 print 모드.
 - 읽기 도구 병렬, plan mode, 1단 서브에이전트(`spawn`/`wait`).
+- 실행 중 Steer. 로컬 크론. TUI 대시보드 패널.
 
 ### 2.3 사용자 특성
 
@@ -70,7 +75,7 @@ flowchart TD
 
 ### 2.4 제약사항
 
-- 언어: Rust. Cargo workspace, crate 7개.
+- 언어: Rust. Cargo workspace, crate 7개. ratatui는 `keel-cli`만.
 - 모델 제공자: OpenAI Responses API만. Chat Completions 없음.
 - 비밀값: 설정 파일에 두지 않는다. 환경 변수만.
 - 대화 상태: OpenAI `store: false`. 로컬 DB가 정본.
@@ -82,7 +87,7 @@ flowchart TD
 
 #### REQ-3.1 커널 루프
 
-한 런은 Inbox에서 `User`를 꺼내 transcript에 붙인 뒤, 모델 호출과 로컬 도구 실행을 `max_turns`(기본 50)까지 반복한다. 모델이 tool call 없이 텍스트만 내면 런을 끝낸다. Act는 native function call이다. 텍스트 ReAct 파서를 만들지 않는다.
+한 런은 시작 `User`(또는 크론이 넣은 프롬프트)를 transcript에 붙인 뒤, 모델 호출과 로컬 도구 실행을 `max_turns`(기본 50)까지 반복한다. 턴 사이에 Inbox의 `Steer`와 `Cron`·`Subagent`를 붙인다. 모델이 tool call 없이 텍스트만 내면 런을 끝낸다. Act는 native function call이다. 텍스트 ReAct 파서를 만들지 않는다.
 
 #### REQ-3.2 턴과 도구 실행 순서
 
@@ -94,13 +99,13 @@ flowchart TD
 
 #### REQ-3.4 Inbox와 훅
 
-Inbox는 `User`와 `Subagent`(자식 완료 요약)를 처리한다. `Hook` `Cron` `Steer`는 타입만 예약한다. Inbox `Hook`을 처리하는 것이 훅이 아니다.
+Inbox는 `User`, `Subagent`(자식 완료 요약), `Steer`(실행 중 입력), `Cron`(스케줄이 연 프롬프트)을 처리한다. `Hook`만 타입 예약이다. Inbox `Hook`을 처리하는 것이 훅이 아니다. `Steer`는 현재 도구를 취소하지 않는다. 다음 모델 호출 전에 user 텍스트로 붙는다.
 
 훅은 루프 콜백이다: `before_tool`, `after_tool`, `prepare_next_turn`, `should_stop`. 채널이 아니다. `Approver`는 `before_tool`의 기본 구현이다. `should_stop`이 멈추면 짝 없는 `tool_call`에 result를 붙인 뒤 런을 끝낸다(REQ-3.3). `prepare_next_turn`은 다음 모델 호출 직전이다. 코어는 파일·네트워크를 모른다. 호스트가 no-op 또는 정책을 넣는다. `Subagent` 메시지는 부모 transcript에 요약 `tool_result`로만 붙는다. 자식 본문을 펼치지 않는다.
 
 #### REQ-3.5 Event 분리
 
-core는 Event만 낸다. 터미널 I/O와 승인 UI는 `keel-cli`에만 둔다. Event 최소 집합: `RunStart`, `TurnStart`, `TextDelta`, `ToolStart`, `ToolEnd`, `HostedTool`, `ContextTrimmed`, `Usage`, `RunEnd`.
+core는 Event만 낸다. 터미널 I/O와 승인 UI는 `keel-cli`에만 둔다. Event 최소 집합: `RunStart`, `TurnStart`, `TextDelta`, `ToolStart`, `ToolEnd`, `HostedTool`, `ContextTrimmed`, `Usage`, `RunEnd`. TUI와 대시보드 패널은 이 Event를 구독한다. 새 HTTP API를 열지 않는다.
 
 #### REQ-3.6 OpenAI Responses
 
@@ -191,20 +196,26 @@ MCP resources/prompts/sampling/subscriptions와 `2026-07-28`의 장기 작업·�
 #### REQ-3.21 CLI 명령
 
 ```text
-keel                     cwd 최근 session. 없으면 새로
+keel                     cwd 최근 session. 없으면 새로. TTY면 TUI
 keel --continue          위와 같음
 keel --resume            cwd 목록에서 고름
 keel --resume <id>       지정 session
 keel --new               새 session
 keel -p "<prompt>"       print 모드
+keel serve               헤드리스 스케줄러. TUI 없음. 잡만 실행
 keel session list [--all]
 keel session show <id>
 keel session rm <id>
+keel cron list
+keel cron add ...
+keel cron rm <id>
 ```
 
-#### REQ-3.22 REPL
+대화형과 `serve`를 같은 DB에 동시에 두지 않는다. 한쪽이 스케줄러 lock을 가진다.
 
-스트리밍 REPL. 텍스트 델타는 도착하는 대로 stdout에 쓰고 flush한다. 모델 SSE를 버퍼링한 뒤 한 번에 그리지 않는다. 마크다운 렌더링과 ratatui는 없다. 도구는 한 줄 요약, `/last`는 직전 도구 출력 전문이다. 승인: `[y]es [a]lways [n]o`. 실행 중 Ctrl-C는 chat을 `interrupted`로 끝낸다. 프롬프트에서 Ctrl-C 두 번 또는 Ctrl-D는 lock을 풀고 종료. 슬래시: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit` `/plan`. `/new`와 `/resume`은 프로세스 재시작 없이 루프 안에서 session을 바꾸고, help에만 있으면 안 된다. `/plan`은 plan mode로 들어가거나, 제시된 계획을 승인·거부한다. `/compact`는 "v2 예정"만.
+#### REQ-3.22 TUI 대화
+
+TTY 대화형의 기본 호스트는 전체 화면 TUI다. rustyline 스트리밍 REPL을 대화형 기본으로 두지 않는다. 텍스트 델타는 도착하는 대로 그린다. 모델 SSE를 버퍼링한 뒤 한 번에 그리지 않는다. 도구는 한 줄 요약, `/last`는 직전 도구 출력 전문이다. 승인: `[y]es [a]lways [n]o`. 실행 중 Ctrl-C는 chat을 `interrupted`로 끝낸다. 프롬프트에서 Ctrl-C 두 번 또는 Ctrl-D는 lock을 풀고 종료. 슬래시: `/new` `/resume` `/name` `/session` `/skills` `/skill:name` `/last` `/help` `/exit` `/plan`. `/new`와 `/resume`은 프로세스 재시작 없이 session을 바꾼다. `/plan`은 plan mode 진입·승인·거부. `/compact`는 "예정"만 출력하고 동작하지 않는다. 비TTY에서 대화형을 열면 실패한다. `-p`는 TUI를 쓰지 않는다.
 
 #### REQ-3.23 print 모드
 
@@ -226,7 +237,7 @@ plan mode에서는 Read 클래스만 실행한다. Write·Exec·External은 승�
 - `wait`: 인자 `ids`(생략 시 이 부모가 연 미완료 자식). 끝나면 각 자식의 요약 `tool_result`를 붙인다.
 - 비동기 완료가 부모 턴 사이면 Inbox `Subagent`로 요약을 넣는다(REQ-3.4).
 - 부모 context와 `/last`는 요약(+ 자식 session id)만. 자식의 `tool_call`/`tool_result`는 자식 session에만 있다. 새 `ItemKind`는 만들지 않는다.
-- 자식의 승인 프롬프트는 부모 REPL로 올린다. 거절은 그 자식의 observation이다.
+- 자식의 승인 프롬프트는 부모 TUI로 올린다. 거절은 그 자식의 observation이다.
 - print 모드는 `spawn`을 거부한다.
 - 런처는 호스트다. 커널에 두 번째 상태기계를 두지 않는다.
 
@@ -238,11 +249,31 @@ plan mode에서는 Read 클래스만 실행한다. Write·Exec·External은 승�
 
 프로토콜 버전은 `rmcp`가 협상한다. 기본은 MCP `2026-07-28`이다. `initialize` 핸드셰이크 서버(`2025-11-25` 이하, `2024-11-05` 포함)도 같은 프로세스에서 붙는다. 한 서버가 협상에 실패하면 그 서버만 빼고 나머지는 붙인다. 코어는 버전 문자열을 모른다.
 
+#### REQ-3.30 TUI 호스트
+
+`keel-cli`가 Event를 구독해 전체 화면을 그린다. ratatui는 `keel-cli`만 의존한다. 코어에 넣지 않는다. 대화 패널과 대시보드 패널(REQ-3.33)은 같은 프로세스다. crush식 별도 UI 프로젝트를 만들지 않는다.
+
+#### REQ-3.31 Steer
+
+실행 중 TUI 입력은 Inbox `Steer { text }`다. 현재 모델 호출과 도구는 계속한다. 다음 모델 호출 직전 transcript에 user 텍스트로 붙인다. Ctrl-C 취소와 다르다. `-p`와 `keel serve`의 크론 런에는 Steer가 없다.
+
+#### REQ-3.32 로컬 크론
+
+호스트 스케줄러가 시각이 되면 Inbox `Cron`으로 대상 session에 chat을 연다. 프롬프트는 잡에 저장된 문구다. 스케줄러 본체는 코어가 아니다.
+
+권한은 잡 정책이다. 기본은 REQ-3.23 print와 같다: 읽기와 hosted `web_search`만. `allow_edits`가 있으면 Write. bash는 잡에 적힌 allowlist만. 위험 패턴은 잡 allowlist가 있어도 실행하지 않고 거부 observation이다. 사람에게 묻지 않는다. session 메모리 allowlist(REQ-3.16, INV-11)와 섞지 않는다.
+
+스케줄러는 TUI 프로세스 또는 `keel serve` 중 하나만 돈다. 대상 session을 다른 프로세스가 `lock_pid`로 잡고 있으면 그 발화는 건너뛰고 잡에 실패를 기록한다. 같은 프로세스면 Inbox로 넣는다.
+
+#### REQ-3.33 대시보드 패널
+
+TUI 안에서 세션 목록, 현재 런 요약, 크론 잡 목록·추가·수정·삭제를 본다. 채팅을 여기서 시작하지 않는다. 대화는 대화 패널이다. `127.0.0.1` HTTP 서버를 열지 않는다.
+
 ### 3.2 비기능 요구사항
 
 #### REQ-4.1 crate 경계
 
-workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `keel-skills`, `keel-cli`. core는 rusqlite, reqwest, rmcp, clap, rustyline, 파일/프로세스 도구를 의존하지 않는다. `rmcp`는 `keel-mcp`만 의존한다.
+workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `keel-skills`, `keel-cli`. core는 rusqlite, reqwest, rmcp, clap, rustyline, ratatui, 파일/프로세스 도구를 의존하지 않는다. `rmcp`는 `keel-mcp`만. ratatui는 `keel-cli`만.
 
 #### REQ-4.2 로그
 
@@ -265,6 +296,10 @@ workspace: `keel-core`, `keel-store`, `keel-openai`, `keel-tools`, `keel-mcp`, `
 #### REQ-5.2 제목
 
 `session.title`은 비워 두고 첫 chat의 user 한 줄 또는 `/name`으로 채운다.
+
+#### REQ-5.3 크론 스키마
+
+`user_version = 2`. 테이블 `cron_job(id, title, cwd, session_id, schedule, prompt, allow_edits, allow_bash, enabled, last_run_at, last_status, created_at, updated_at)`. `session_id`는 비우면 그 cwd의 최근 session. 식별자는 ULID. 스케줄러 lock은 별 행 또는 파일 한 개로 한 프로세스만 잡는다.
 
 ## 4. 품질 속성
 

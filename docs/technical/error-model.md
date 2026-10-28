@@ -1,6 +1,6 @@
 # Error model
 
-권위: [srs.md](../planning/srs.md) REQ-4.4, REQ-3.13, REQ-3.18, REQ-3.23, REQ-3.26–3.29.
+권위: [srs.md](../planning/srs.md) REQ-4.4, REQ-3.13, REQ-3.18, REQ-3.23, REQ-3.26–3.33.
 
 ## 분류
 
@@ -16,6 +16,7 @@
 | `tool` | bash 타임아웃, 비0, MCP 서버 다운, 자식 실패 요약 | 도구 오류를 observation으로 | 런 계속 | 루프 유지 |
 | `limit` | `max_turns` 또는 자식 4개 초과 | 한도 | done 아님 또는 spawn 거부 | `-p` 종료 코드 2 또는 observation |
 | `config` | TOML 파싱, 필수 값 없음 | 경로와 필드 | (시작 전) | 실패 |
+| `cron_skip` | 대상 session이 다른 프로세스 lock | 잡 last_status에 기록 | (열지 않음) | 스케줄러 유지 |
 
 ## 복구
 
@@ -25,6 +26,7 @@
 - 취소: 진행 중 모델/도구를 끊고 짝을 맞춘 뒤 lock은 REPL이면 유지, 종료면 해제. 부모 취소는 미완료 자식도 끊고 부모에 interrupted 요약을 붙인다.
 - plan mode 쓰기: `denied` observation. 런은 유지.
 - spawn 한도: 이미 4개가 돌면 새 `spawn`은 `limit` observation. 루프는 산다.
+- 크론: 대상 session이 lock이면 그 발화만 `cron_skip`. 스케줄러는 산다. 잡 정책 거부는 `denied` observation.
 
 ## print 모드 종료 코드
 

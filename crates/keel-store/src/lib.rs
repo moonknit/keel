@@ -6,7 +6,7 @@ use keel_core::types::{
     Chat, ChatStatus, Item, ItemKind, Role, SessionMeta, Usage, WorkingSession,
 };
 use keel_core::{KeelError, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,6 +51,61 @@ CREATE TABLE IF NOT EXISTS message (
 CREATE INDEX IF NOT EXISTS idx_session_cwd_updated ON session (cwd, archived, updated_at DESC);
 "#;
 
+const SCHEMA_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS cron_job (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  cwd TEXT NOT NULL,
+  session_id TEXT,
+  schedule TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  allow_edits INTEGER NOT NULL DEFAULT 0,
+  allow_bash TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at INTEGER,
+  last_status TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS scheduler_lock (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  pid INTEGER NOT NULL,
+  acquired_at INTEGER NOT NULL
+);
+"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronJob {
+    pub id: String,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub session_id: Option<String>,
+    pub schedule: String,
+    pub prompt: String,
+    pub allow_edits: bool,
+    pub allow_bash: String,
+    pub enabled: bool,
+    pub last_run_at: Option<i64>,
+    pub last_status: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn apply_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA)
+        .map_err(|e| KeelError::Msg(e.to_string()))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| KeelError::Msg(e.to_string()))?;
+    if version < 2 {
+        conn.execute_batch(SCHEMA_V2)
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        conn.pragma_update(None, "user_version", 2)
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+    }
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -68,10 +123,7 @@ impl SqliteStore {
             std::fs::create_dir_all(parent).map_err(|e| KeelError::Msg(e.to_string()))?;
         }
         let conn = Connection::open(path).map_err(|e| KeelError::Msg(e.to_string()))?;
-        conn.execute_batch(SCHEMA)
-            .map_err(|e| KeelError::Msg(e.to_string()))?;
-        conn.pragma_update(None, "user_version", 1)
-            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        apply_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -79,11 +131,225 @@ impl SqliteStore {
 
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(|e| KeelError::Msg(e.to_string()))?;
-        conn.execute_batch(SCHEMA)
-            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        apply_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    pub fn user_version(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| KeelError::Msg(e.to_string()))
+    }
+
+    pub fn session_lock_pid(&self, id: &str) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        conn.query_row("SELECT lock_pid FROM session WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .map_err(|e| KeelError::Msg(e.to_string()))
+    }
+
+    pub fn add_cron(
+        &self,
+        title: Option<&str>,
+        cwd: &str,
+        session_id: Option<&str>,
+        schedule: &str,
+        prompt: &str,
+        allow_edits: bool,
+        allow_bash: &str,
+    ) -> Result<CronJob> {
+        let job = CronJob {
+            id: ulid::Ulid::new().to_string(),
+            title: title.map(str::to_string),
+            cwd: cwd.into(),
+            session_id: session_id
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            schedule: schedule.into(),
+            prompt: prompt.into(),
+            allow_edits,
+            allow_bash: allow_bash.into(),
+            enabled: true,
+            last_run_at: None,
+            last_status: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| KeelError::Msg("lock".into()))?;
+            conn.execute(
+                "INSERT INTO cron_job (id,title,cwd,session_id,schedule,prompt,allow_edits,allow_bash,enabled,last_run_at,last_status,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                params![
+                    job.id,
+                    job.title,
+                    job.cwd,
+                    job.session_id,
+                    job.schedule,
+                    job.prompt,
+                    job.allow_edits as i64,
+                    job.allow_bash,
+                    job.enabled as i64,
+                    job.last_run_at,
+                    job.last_status,
+                    job.created_at,
+                    job.updated_at
+                ],
+            )
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        }
+        Ok(job)
+    }
+
+    pub fn list_cron(&self, cwd: Option<&str>) -> Result<Vec<CronJob>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id,title,cwd,session_id,schedule,prompt,allow_edits,allow_bash,enabled,last_run_at,last_status,created_at,updated_at
+                 FROM cron_job WHERE (?1 IS NULL OR cwd=?1) ORDER BY created_at",
+            )
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        let rows = stmt
+            .query_map([cwd], |row| {
+                Ok(CronJob {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    cwd: row.get(2)?,
+                    session_id: row.get(3)?,
+                    schedule: row.get(4)?,
+                    prompt: row.get(5)?,
+                    allow_edits: row.get::<_, i64>(6)? != 0,
+                    allow_bash: row.get(7)?,
+                    enabled: row.get::<_, i64>(8)? != 0,
+                    last_run_at: row.get(9)?,
+                    last_status: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            })
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        rows.map(|r| r.map_err(|e| KeelError::Msg(e.to_string())))
+            .collect()
+    }
+
+    pub fn get_cron(&self, id: &str) -> Result<CronJob> {
+        self.list_cron(None)?
+            .into_iter()
+            .find(|j| j.id == id)
+            .ok_or_else(|| KeelError::Msg(format!("cron job {id} not found")))
+    }
+
+    pub fn update_cron(&self, job: &CronJob) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        let n = conn
+            .execute(
+                "UPDATE cron_job SET title=?1,cwd=?2,session_id=?3,schedule=?4,prompt=?5,allow_edits=?6,allow_bash=?7,enabled=?8,last_run_at=?9,last_status=?10,updated_at=?11 WHERE id=?12",
+                params![
+                    job.title,
+                    job.cwd,
+                    job.session_id,
+                    job.schedule,
+                    job.prompt,
+                    job.allow_edits as i64,
+                    job.allow_bash,
+                    job.enabled as i64,
+                    job.last_run_at,
+                    job.last_status,
+                    now_ms(),
+                    job.id
+                ],
+            )
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        if n == 0 {
+            return Err(KeelError::Msg(format!("cron job {} not found", job.id)));
+        }
+        Ok(())
+    }
+
+    pub fn delete_cron(&self, id: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        let n = conn
+            .execute("DELETE FROM cron_job WHERE id=?1", [id])
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        if n == 0 {
+            return Err(KeelError::Msg(format!("cron job {id} not found")));
+        }
+        Ok(())
+    }
+
+    pub fn mark_cron_run(&self, id: &str, status: &str, at: i64) -> Result<()> {
+        let mut job = self.get_cron(id)?;
+        job.last_run_at = Some(at);
+        job.last_status = Some(status.into());
+        self.update_cron(&job)
+    }
+
+    pub fn acquire_scheduler(&self, pid: i64) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        let held: Option<i64> = conn
+            .query_row("SELECT pid FROM scheduler_lock WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        match held {
+            Some(existing) if existing == pid => return Ok(true),
+            Some(existing) if pid_alive(existing) => return Ok(false),
+            _ => {}
+        }
+        conn.execute(
+            "INSERT INTO scheduler_lock (id,pid,acquired_at) VALUES (1,?1,?2)
+             ON CONFLICT(id) DO UPDATE SET pid=?1, acquired_at=?2",
+            params![pid, now_ms()],
+        )
+        .map_err(|e| KeelError::Msg(e.to_string()))?;
+        Ok(true)
+    }
+
+    pub fn release_scheduler(&self, pid: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        conn.execute("DELETE FROM scheduler_lock WHERE id=1 AND pid=?1", [pid])
+            .map_err(|e| KeelError::Msg(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn scheduler_pid(&self) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KeelError::Msg("lock".into()))?;
+        conn.query_row("SELECT pid FROM scheduler_lock WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|e| KeelError::Msg(e.to_string()))
     }
 
     fn load_session_locked(conn: &Connection, id: &str) -> Result<WorkingSession> {
@@ -632,5 +898,71 @@ mod tests {
         let loaded = store.open_session(&ws.meta.id).await.unwrap();
         assert_eq!(loaded.meta.cwd, "/repo");
         assert_eq!(loaded.chats[0].items.len(), 1);
+    }
+
+    /// REQ-5.3 user_version is 2 and cron_job CRUD stays on the job row.
+    #[test]
+    fn req_5_3_cron_job_schema_and_crud() {
+        let store = SqliteStore::open_memory().unwrap();
+        assert_eq!(store.user_version().unwrap(), 2);
+        let job = store
+            .add_cron(
+                Some("nightly"),
+                "/ws",
+                None,
+                "0 0 * * *",
+                "summarize",
+                true,
+                "ls",
+            )
+            .unwrap();
+        assert!(!job.id.is_empty());
+        assert_eq!(job.allow_edits, true);
+        assert_eq!(job.allow_bash, "ls");
+        let listed = store.list_cron(Some("/ws")).unwrap();
+        assert_eq!(listed.len(), 1);
+        store.mark_cron_run(&job.id, "ok", 42).unwrap();
+        let loaded = store.get_cron(&job.id).unwrap();
+        assert_eq!(loaded.last_status.as_deref(), Some("ok"));
+        assert_eq!(loaded.last_run_at, Some(42));
+        store.delete_cron(&job.id).unwrap();
+        assert!(store.list_cron(None).unwrap().is_empty());
+    }
+
+    /// REQ-5.3 opening a v1 file migrates to user_version 2 with cron_job.
+    #[test]
+    fn req_5_3_migrates_v1_file_to_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.user_version().unwrap(), 2);
+        store
+            .add_cron(None, "/ws", None, "* * * * *", "hi", false, "")
+            .unwrap();
+        assert_eq!(store.list_cron(None).unwrap().len(), 1);
+    }
+
+    /// REQ-5.3 INV-20 scheduler lock is one live pid.
+    #[test]
+    fn req_5_3_inv20_scheduler_lock_one_live_pid() {
+        let store = SqliteStore::open_memory().unwrap();
+        let me = i64::from(std::process::id());
+        assert!(store.acquire_scheduler(me).unwrap());
+        assert!(store.acquire_scheduler(me).unwrap());
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("live child");
+        let foreign = i64::from(child.id());
+        assert!(!store.acquire_scheduler(foreign).unwrap());
+        store.release_scheduler(me).unwrap();
+        assert!(store.acquire_scheduler(foreign).unwrap());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

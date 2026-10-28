@@ -42,6 +42,21 @@ fn live_openai() -> Option<(String, String, String)> {
     Some((key, model, base))
 }
 
+/// REQ-3.22 non-TTY interactive host fails; `-p` does not open TUI.
+#[test]
+fn req_3_22_nontty_interactive_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = scripted(dir.path()).output().expect("run");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("TTY"), "{err}");
+}
+
 /// REQ-3.23 print mode exit 0 with scripted model.
 #[test]
 fn req_3_23_print_mode_scripted() {
